@@ -199,6 +199,7 @@ const extractPendingAssignment: PendingAssignmentExtractor = (node, scopeEnv) =>
 export const typeConfig: LanguageTypeConfig = {
   declarationNodeTypes: DECLARATION_NODE_TYPES,
   forLoopNodeTypes: FOR_LOOP_NODE_TYPES,
+  patternBindingNodeTypes: new Set(['is_pattern_expression']),
   extractDeclaration,
   extractParameter,
   scanConstructorBinding,

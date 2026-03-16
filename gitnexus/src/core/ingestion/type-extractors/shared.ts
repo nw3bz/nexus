@@ -349,7 +349,7 @@ function extractFirstArg(args: string): string {
  * (e.g., nested generics as element types).
  */
 export function extractElementTypeFromString(typeStr: string): string | undefined {
-  if (!typeStr || typeStr.length === 0) return undefined;
+  if (!typeStr || typeStr.length === 0 || typeStr.length > 2048) return undefined;
 
   // 1. Array suffix: User[] → User
   if (typeStr.endsWith('[]')) {
