@@ -1,6 +1,6 @@
 import type { SyntaxNode } from '../utils.js';
-import type { LanguageTypeConfig, ParameterExtractor, TypeBindingExtractor, InitializerExtractor, ClassNameLookup, ConstructorBindingScanner, ReturnTypeExtractor, PendingAssignmentExtractor } from './types.js';
-import { extractSimpleTypeName, extractVarName, extractCalleeName } from './shared.js';
+import type { LanguageTypeConfig, ParameterExtractor, TypeBindingExtractor, InitializerExtractor, ClassNameLookup, ConstructorBindingScanner, ReturnTypeExtractor, PendingAssignmentExtractor, ForLoopExtractor } from './types.js';
+import { extractSimpleTypeName, extractVarName, extractCalleeName, resolveIterableElementType } from './shared.js';
 
 const DECLARATION_NODE_TYPES: ReadonlySet<string> = new Set([
   'assignment_expression',   // For constructor inference: $x = new User()
@@ -190,8 +190,12 @@ const extractParameter: ParameterExtractor = (node: SyntaxNode, env: Map<string,
 
   if (!nameNode || !typeNode) return;
   const varName = extractVarName(nameNode);
+  if (!varName) return;
+  // Don't overwrite PHPDoc-derived types (e.g. @param User[] $users → User)
+  // with the less-specific AST type annotation (e.g. array).
+  if (env.has(varName)) return;
   const typeName = extractSimpleTypeName(typeNode);
-  if (varName && typeName) env.set(varName, typeName);
+  if (typeName) env.set(varName, typeName);
 };
 
 /** PHP: $x = SomeFactory() or $x = $this->getUser() — bind variable to call return type */
@@ -259,12 +263,124 @@ const extractPendingAssignment: PendingAssignmentExtractor = (node, scopeEnv) =>
   return { lhs, rhs };
 };
 
+const FOR_LOOP_NODE_TYPES: ReadonlySet<string> = new Set([
+  'foreach_statement',
+]);
+
+/** Extract element type from a PHP type annotation AST node.
+ *  PHP has limited AST-level container types — `array` is a primitive_type with no generic args.
+ *  Named types (e.g., `Collection`) are returned as-is (container descriptor lookup handles them). */
+const extractPhpElementTypeFromTypeNode = (_typeNode: SyntaxNode): string | undefined => {
+  // PHP AST type nodes don't carry generic parameters (array<User> is PHPDoc-only).
+  // primitive_type 'array' and named_type 'Collection' don't encode element types.
+  return undefined;
+};
+
+/** Walk up from a foreach to the enclosing function and search parameter type annotations.
+ *  PHP parameter type hints are limited (array, ClassName) — this extracts element type when possible. */
+const findPhpParamElementType = (iterableName: string, startNode: SyntaxNode): string | undefined => {
+  let current: SyntaxNode | null = startNode.parent;
+  while (current) {
+    if (current.type === 'method_declaration' || current.type === 'function_definition') {
+      const paramsNode = current.childForFieldName('parameters');
+      if (paramsNode) {
+        for (let i = 0; i < paramsNode.namedChildCount; i++) {
+          const param = paramsNode.namedChild(i);
+          if (!param || param.type !== 'simple_parameter') continue;
+          const nameNode = param.childForFieldName('name');
+          if (nameNode?.text !== iterableName) continue;
+          const typeNode = param.childForFieldName('type');
+          if (typeNode) return extractPhpElementTypeFromTypeNode(typeNode);
+        }
+      }
+      break;
+    }
+    current = current.parent;
+  }
+  return undefined;
+};
+
+/**
+ * PHP: foreach ($users as $user) — extract loop variable binding.
+ *
+ * AST structure (from tree-sitter-php grammar):
+ *   foreach_statement — no named fields for iterable/value (only 'body')
+ *     children[0]: expression (iterable, e.g. $users)
+ *     children[1]: expression (simple value) OR pair ($key => $value)
+ *       pair children: expression (key), expression (value)
+ *
+ * PHP's PHPDoc @param normalizes `User[]` → `User` in the env, so the iterable's
+ * stored type IS the element type. We first try resolveIterableElementType (for
+ * constructor-binding cases that retain container types), then fall back to direct
+ * scopeEnv lookup (for PHPDoc-normalized types).
+ */
+const extractForLoopBinding: ForLoopExtractor = (
+  node: SyntaxNode,
+  scopeEnv: Map<string, string>,
+  declarationTypeNodes: ReadonlyMap<string, SyntaxNode>,
+  scope: string,
+): void => {
+  if (node.type !== 'foreach_statement') return;
+
+  // Collect non-body named children: first is the iterable, second is value or pair
+  const children: SyntaxNode[] = [];
+  for (let i = 0; i < node.namedChildCount; i++) {
+    const child = node.namedChild(i);
+    if (child && child !== node.childForFieldName('body')) {
+      children.push(child);
+    }
+  }
+  if (children.length < 2) return;
+
+  const iterableNode = children[0];
+  const valueOrPair = children[1];
+
+  // Determine the loop variable node
+  let loopVarNode: SyntaxNode;
+  if (valueOrPair.type === 'pair') {
+    // $key => $value — the value is the last named child of the pair
+    const lastChild = valueOrPair.namedChild(valueOrPair.namedChildCount - 1);
+    if (!lastChild) return;
+    // Handle by_ref: foreach ($arr as $k => &$v)
+    loopVarNode = lastChild.type === 'by_ref' ? (lastChild.firstNamedChild ?? lastChild) : lastChild;
+  } else {
+    // Simple: foreach ($users as $user) or foreach ($users as &$user)
+    loopVarNode = valueOrPair.type === 'by_ref' ? (valueOrPair.firstNamedChild ?? valueOrPair) : valueOrPair;
+  }
+
+  const varName = extractVarName(loopVarNode);
+  if (!varName) return;
+
+  // Get iterable variable name (PHP vars include $ prefix)
+  const iterableName = iterableNode.type === 'variable_name' ? iterableNode.text : undefined;
+  if (!iterableName) return;
+
+  // Strategy A: try resolveIterableElementType (handles constructor-binding container types)
+  const elementType = resolveIterableElementType(
+    iterableName, node, scopeEnv, declarationTypeNodes, scope,
+    extractPhpElementTypeFromTypeNode, findPhpParamElementType,
+  );
+  if (elementType) {
+    scopeEnv.set(varName, elementType);
+    return;
+  }
+
+  // Strategy B: direct scopeEnv lookup — PHP normalizePhpType strips User[] → User,
+  // so the iterable's stored type is already the element type from PHPDoc annotations.
+  const iterableType = scopeEnv.get(iterableName);
+  if (iterableType) {
+    scopeEnv.set(varName, iterableType);
+  }
+};
+
 export const typeConfig: LanguageTypeConfig = {
   declarationNodeTypes: DECLARATION_NODE_TYPES,
+  forLoopNodeTypes: FOR_LOOP_NODE_TYPES,
   extractDeclaration,
   extractParameter,
   extractInitializer,
   scanConstructorBinding,
   extractReturnType,
+  extractForLoopBinding,
   extractPendingAssignment,
 };

@@ -918,3 +918,46 @@ describe('Java enum static method call resolution (Phase 5 review fix)', () => {
     expect(labelCall).toBeDefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Java Map .values() for-loop — method-aware type arg resolution
+// ---------------------------------------------------------------------------
+
+describe('Java Map .values() for-loop resolution', () => {
+  let result: PipelineResult;
+
+  beforeAll(async () => {
+    result = await runPipelineFromRepo(
+      path.join(FIXTURES, 'java-map-keys-values'),
+      () => {},
+    );
+  }, 60000);
+
+  it('detects User class with save method', () => {
+    expect(getNodesByLabel(result, 'Class')).toContain('User');
+  });
+
+  it('resolves user.save() via Map.values() to User#save', () => {
+    const calls = getRelationships(result, 'CALLS');
+    const userSave = calls.find(c =>
+      c.target === 'save' && c.source === 'processValues' && c.targetFilePath?.includes('User'),
+    );
+    expect(userSave).toBeDefined();
+  });
+
+  it('does NOT resolve user.save() to Repo#save (negative)', () => {
+    const calls = getRelationships(result, 'CALLS');
+    const wrongSave = calls.find(c =>
+      c.target === 'save' && c.source === 'processValues' && c.targetFilePath?.includes('Repo'),
+    );
+    expect(wrongSave).toBeUndefined();
+  });
+
+  it('resolves user.save() via List iteration to User#save', () => {
+    const calls = getRelationships(result, 'CALLS');
+    const userSave = calls.find(c =>
+      c.target === 'save' && c.source === 'processList' && c.targetFilePath?.includes('User'),
+    );
+    expect(userSave).toBeDefined();
+  });
+});

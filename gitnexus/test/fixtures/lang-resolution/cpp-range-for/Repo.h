@@ -1,9 +1,9 @@
 #pragma once
 #include <string>
 
-class User {
+class Repo {
 public:
-    User(const std::string& name) : name_(name) {}
+    Repo(const std::string& name) : name_(name) {}
     void save() {}
 private:
     std::string name_;

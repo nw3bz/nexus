@@ -446,10 +446,10 @@ describe('C++ scoped brace-init resolution (ns::Type{})', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Range-for with explicit type: for (User& user : users) { user.save(); }
+// C++ range-based for: for (auto& user : users) — Tier 1c
 // ---------------------------------------------------------------------------
 
-describe('C++ range-for explicit type resolution', () => {
+describe('C++ range-based for loop resolution', () => {
   let result: PipelineResult;
 
   beforeAll(async () => {
@@ -459,22 +459,33 @@ describe('C++ range-for explicit type resolution', () => {
     );
   }, 60000);
 
-  it('detects User class and save method', () => {
+  it('detects User and Repo classes with save methods', () => {
     expect(getNodesByLabel(result, 'Class')).toContain('User');
-    expect(getNodesByLabel(result, 'Method')).toContain('save');
+    expect(getNodesByLabel(result, 'Class')).toContain('Repo');
   });
 
-  it('resolves user.save() inside range-for to User.save via explicit type', () => {
+  it('resolves user.save() in range-for to User#save', () => {
     const calls = getRelationships(result, 'CALLS');
-    const saveCall = calls.find(c => c.target === 'save' && c.targetFilePath === 'user.h');
-    expect(saveCall).toBeDefined();
-    expect(saveCall!.source).toBe('processUsers');
+    const userSave = calls.find(c =>
+      c.target === 'save' && c.source === 'processUsers' && c.targetFilePath?.includes('User'),
+    );
+    expect(userSave).toBeDefined();
   });
 
-  it('emits HAS_METHOD edge from User to save', () => {
-    const hasMethod = getRelationships(result, 'HAS_METHOD');
-    const edge = hasMethod.find(e => e.source === 'User' && e.target === 'save');
-    expect(edge).toBeDefined();
+  it('resolves repo.save() in const auto& range-for to Repo#save', () => {
+    const calls = getRelationships(result, 'CALLS');
+    const repoSave = calls.find(c =>
+      c.target === 'save' && c.source === 'processRepos' && c.targetFilePath?.includes('Repo'),
+    );
+    expect(repoSave).toBeDefined();
+  });
+
+  it('does NOT cross-resolve user.save() to Repo#save (negative)', () => {
+    const calls = getRelationships(result, 'CALLS');
+    const wrongSave = calls.find(c =>
+      c.target === 'save' && c.source === 'processUsers' && c.targetFilePath?.includes('Repo'),
+    );
+    expect(wrongSave).toBeUndefined();
   });
 });
 

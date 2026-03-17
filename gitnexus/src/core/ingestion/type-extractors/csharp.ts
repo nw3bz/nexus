@@ -1,6 +1,6 @@
 import type { SyntaxNode } from '../utils.js';
 import type { ConstructorBindingScanner, ForLoopExtractor, LanguageTypeConfig, ParameterExtractor, TypeBindingExtractor, PendingAssignmentExtractor, PatternBindingExtractor } from './types.js';
-import { extractSimpleTypeName, extractVarName, findChildByType, unwrapAwait, extractGenericTypeArgs, resolveIterableElementType } from './shared.js';
+import { extractSimpleTypeName, extractVarName, findChildByType, unwrapAwait, extractGenericTypeArgs, resolveIterableElementType, methodToTypeArgPosition, type TypeArgPosition } from './shared.js';
 
 const DECLARATION_NODE_TYPES: ReadonlySet<string> = new Set([
   'local_declaration_statement',
@@ -132,14 +132,21 @@ const FOR_LOOP_NODE_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /** Extract element type from a C# type annotation AST node.
- *  Handles generic_name (List<User>), array_type (User[]), nullable_type (?). */
-const extractCSharpElementTypeFromTypeNode = (typeNode: SyntaxNode): string | undefined => {
-  // generic_name: List<User>, IEnumerable<User> — C# uses generic_name (not generic_type)
+ *  Handles generic_name (List<User>), array_type (User[]), nullable_type (?).
+ *  `pos` selects which type arg: 'first' for keys, 'last' for values (default). */
+const extractCSharpElementTypeFromTypeNode = (typeNode: SyntaxNode, pos: TypeArgPosition = 'last'): string | undefined => {
+  // generic_name: List<User>, IEnumerable<User>, Dictionary<string, User>
+  // C# uses generic_name (not generic_type)
   if (typeNode.type === 'generic_name') {
     const argList = findChildByType(typeNode, 'type_argument_list');
     if (argList && argList.namedChildCount >= 1) {
-      const firstArg = argList.namedChild(0);
-      if (firstArg) return extractSimpleTypeName(firstArg);
+      if (pos === 'first') {
+        const firstArg = argList.namedChild(0);
+        if (firstArg) return extractSimpleTypeName(firstArg);
+      } else {
+        const lastArg = argList.namedChild(argList.namedChildCount - 1);
+        if (lastArg) return extractSimpleTypeName(lastArg);
+      }
     }
   }
   // array_type: User[]
@@ -150,13 +157,13 @@ const extractCSharpElementTypeFromTypeNode = (typeNode: SyntaxNode): string | un
   // nullable_type: unwrap and recurse (List<User>? → List<User> → User)
   if (typeNode.type === 'nullable_type') {
     const inner = typeNode.firstNamedChild;
-    if (inner) return extractCSharpElementTypeFromTypeNode(inner);
+    if (inner) return extractCSharpElementTypeFromTypeNode(inner, pos);
   }
   return undefined;
 };
 
 /** Walk up from a foreach to the enclosing method and search parameters. */
-const findCSharpParamElementType = (iterableName: string, startNode: SyntaxNode): string | undefined => {
+const findCSharpParamElementType = (iterableName: string, startNode: SyntaxNode, pos: TypeArgPosition = 'last'): string | undefined => {
   let current: SyntaxNode | null = startNode.parent;
   while (current) {
     if (current.type === 'method_declaration' || current.type === 'local_function_statement') {
@@ -168,7 +175,7 @@ const findCSharpParamElementType = (iterableName: string, startNode: SyntaxNode)
           const nameNode = param.childForFieldName('name');
           if (nameNode?.text !== iterableName) continue;
           const typeNode = param.childForFieldName('type');
-          if (typeNode) return extractCSharpElementTypeFromTypeNode(typeNode);
+          if (typeNode) return extractCSharpElementTypeFromTypeNode(typeNode, pos);
         }
       }
       break;
@@ -201,12 +208,35 @@ const extractForLoopBinding: ForLoopExtractor = (
 
   // Tier 1c: implicit type (var) — resolve from iterable's container type
   const rightNode = node.childForFieldName('right');
-  if (!rightNode || rightNode.type !== 'identifier') return;
-  const iterableName = rightNode.text;
+  let iterableName: string | undefined;
+  let methodName: string | undefined;
 
+  if (rightNode?.type === 'identifier') {
+    iterableName = rightNode.text;
+  } else if (rightNode?.type === 'member_access_expression') {
+    // C# property access: data.Keys, data.Values → member_access_expression
+    const obj = rightNode.childForFieldName('expression');
+    const prop = rightNode.childForFieldName('name');
+    if (obj?.type === 'identifier') iterableName = obj.text;
+    if (prop?.type === 'identifier') methodName = prop.text;
+  } else if (rightNode?.type === 'invocation_expression') {
+    // C# method call: data.Select(...) → invocation_expression > member_access_expression
+    const fn = rightNode.firstNamedChild;
+    if (fn?.type === 'member_access_expression') {
+      const obj = fn.childForFieldName('expression');
+      const prop = fn.childForFieldName('name');
+      if (obj?.type === 'identifier') iterableName = obj.text;
+      if (prop?.type === 'identifier') methodName = prop.text;
+    }
+  }
+  if (!iterableName) return;
+
+  const containerTypeName = scopeEnv.get(iterableName);
+  const typeArgPos = methodToTypeArgPosition(methodName, containerTypeName);
   const elementType = resolveIterableElementType(
     iterableName, node, scopeEnv, declarationTypeNodes, scope,
     extractCSharpElementTypeFromTypeNode, findCSharpParamElementType,
+    typeArgPos,
   );
   if (elementType) scopeEnv.set(varName, elementType);
 };

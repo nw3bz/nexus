@@ -1,6 +1,6 @@
 import type { SyntaxNode } from '../utils.js';
 import type { LanguageTypeConfig, ParameterExtractor, TypeBindingExtractor, InitializerExtractor, ClassNameLookup, ConstructorBindingScanner, ForLoopExtractor, PendingAssignmentExtractor, PatternBindingExtractor } from './types.js';
-import { extractSimpleTypeName, extractVarName, findChildByType, extractGenericTypeArgs, resolveIterableElementType } from './shared.js';
+import { extractSimpleTypeName, extractVarName, findChildByType, extractGenericTypeArgs, resolveIterableElementType, methodToTypeArgPosition, type TypeArgPosition } from './shared.js';
 
 // ── Java ──────────────────────────────────────────────────────────────────
 
@@ -91,10 +91,10 @@ const JAVA_FOR_LOOP_NODE_TYPES: ReadonlySet<string> = new Set([
 
 /** Extract element type from a Java type annotation AST node.
  *  Handles generic_type (List<User>), array_type (User[]). */
-const extractJavaElementTypeFromTypeNode = (typeNode: SyntaxNode): string | undefined => {
+const extractJavaElementTypeFromTypeNode = (typeNode: SyntaxNode, pos: TypeArgPosition = 'last'): string | undefined => {
   if (typeNode.type === 'generic_type') {
     const args = extractGenericTypeArgs(typeNode);
-    if (args.length >= 1) return args[0];
+    if (args.length >= 1) return pos === 'first' ? args[0] : args[args.length - 1];
   }
   if (typeNode.type === 'array_type') {
     const elemNode = typeNode.firstNamedChild;
@@ -104,7 +104,7 @@ const extractJavaElementTypeFromTypeNode = (typeNode: SyntaxNode): string | unde
 };
 
 /** Walk up from a for-each to the enclosing method_declaration and search parameters. */
-const findJavaParamElementType = (iterableName: string, startNode: SyntaxNode): string | undefined => {
+const findJavaParamElementType = (iterableName: string, startNode: SyntaxNode, pos: TypeArgPosition = 'last'): string | undefined => {
   let current: SyntaxNode | null = startNode.parent;
   while (current) {
     if (current.type === 'method_declaration' || current.type === 'constructor_declaration') {
@@ -116,7 +116,7 @@ const findJavaParamElementType = (iterableName: string, startNode: SyntaxNode): 
           const nameNode = param.childForFieldName('name');
           if (nameNode?.text !== iterableName) continue;
           const typeNode = param.childForFieldName('type');
-          if (typeNode) return extractJavaElementTypeFromTypeNode(typeNode);
+          if (typeNode) return extractJavaElementTypeFromTypeNode(typeNode, pos);
         }
       }
       break;
@@ -149,12 +149,27 @@ const extractJavaForLoopBinding: ForLoopExtractor = (
 
   // Tier 1c: var — resolve from iterable's container type
   const iterableNode = node.childForFieldName('value');
-  if (!iterableNode || iterableNode.type !== 'identifier') return;
-  const iterableName = iterableNode.text;
+  if (!iterableNode) return;
 
+  let iterableName: string | undefined;
+  let methodName: string | undefined;
+  if (iterableNode.type === 'identifier') {
+    iterableName = iterableNode.text;
+  } else if (iterableNode.type === 'method_invocation') {
+    // data.keySet() → method_invocation > object: identifier + name: identifier
+    const obj = iterableNode.childForFieldName('object');
+    const name = iterableNode.childForFieldName('name');
+    if (obj?.type === 'identifier') iterableName = obj.text;
+    if (name) methodName = name.text;
+  }
+  if (!iterableName) return;
+
+  const containerTypeName = scopeEnv.get(iterableName);
+  const typeArgPos = methodToTypeArgPosition(methodName, containerTypeName);
   const elementType = resolveIterableElementType(
     iterableName, node, scopeEnv, declarationTypeNodes, scope,
     extractJavaElementTypeFromTypeNode, findJavaParamElementType,
+    typeArgPos,
   );
   if (elementType) scopeEnv.set(varName, elementType);
 };
@@ -343,16 +358,18 @@ const KOTLIN_FOR_LOOP_NODE_TYPES: ReadonlySet<string> = new Set([
 /** Extract element type from a Kotlin type annotation AST node (user_type wrapping generic).
  *  Kotlin: user_type → [type_identifier, type_arguments → [type_projection → user_type]]
  *  Handles the type_projection wrapper that Kotlin uses for generic type arguments. */
-const extractKotlinElementTypeFromTypeNode = (typeNode: SyntaxNode): string | undefined => {
+const extractKotlinElementTypeFromTypeNode = (typeNode: SyntaxNode, pos: TypeArgPosition = 'last'): string | undefined => {
   if (typeNode.type === 'user_type') {
     const argsNode = findChildByType(typeNode, 'type_arguments');
     if (argsNode && argsNode.namedChildCount >= 1) {
-      const firstArg = argsNode.namedChild(0);
-      if (!firstArg) return undefined;
+      const targetArg = pos === 'first'
+        ? argsNode.namedChild(0)
+        : argsNode.namedChild(argsNode.namedChildCount - 1);
+      if (!targetArg) return undefined;
       // Kotlin wraps type args in type_projection — unwrap to get the inner type
-      const inner = firstArg.type === 'type_projection'
-        ? firstArg.firstNamedChild
-        : firstArg;
+      const inner = targetArg.type === 'type_projection'
+        ? targetArg.firstNamedChild
+        : targetArg;
       if (inner) return extractSimpleTypeName(inner);
     }
   }
@@ -361,7 +378,7 @@ const extractKotlinElementTypeFromTypeNode = (typeNode: SyntaxNode): string | un
 
 /** Walk up from a for-loop to the enclosing function_declaration and search parameters.
  *  Kotlin parameters use positional children (simple_identifier, user_type), not named fields. */
-const findKotlinParamElementType = (iterableName: string, startNode: SyntaxNode): string | undefined => {
+const findKotlinParamElementType = (iterableName: string, startNode: SyntaxNode, pos: TypeArgPosition = 'last'): string | undefined => {
   let current: SyntaxNode | null = startNode.parent;
   while (current) {
     if (current.type === 'function_declaration') {
@@ -373,7 +390,7 @@ const findKotlinParamElementType = (iterableName: string, startNode: SyntaxNode)
           const nameNode = findChildByType(param, 'simple_identifier');
           if (nameNode?.text !== iterableName) continue;
           const typeNode = findChildByType(param, 'user_type');
-          if (typeNode) return extractKotlinElementTypeFromTypeNode(typeNode);
+          if (typeNode) return extractKotlinElementTypeFromTypeNode(typeNode, pos);
         }
       }
       break;
@@ -407,23 +424,53 @@ const extractKotlinForLoopBinding: ForLoopExtractor = (
   }
 
   // Tier 1c: no annotation — resolve from iterable's container type
-  // Kotlin for-loop children: [variable_declaration, simple_identifier(iterable), control_structure_body]
+  // Kotlin for-loop children: [variable_declaration, iterable_expr, control_structure_body]
   // The iterable is the second named child of the for_statement (after variable_declaration)
   let iterableName: string | undefined;
+  let methodName: string | undefined;
   let foundVarDecl = false;
   for (let i = 0; i < node.namedChildCount; i++) {
     const child = node.namedChild(i);
     if (child === varDecl) { foundVarDecl = true; continue; }
-    if (foundVarDecl && child?.type === 'simple_identifier') {
+    if (!foundVarDecl || !child) continue;
+    if (child.type === 'simple_identifier') {
       iterableName = child.text;
+      break;
+    }
+    if (child.type === 'navigation_expression') {
+      // data.keys → navigation_expression > simple_identifier(data) + navigation_suffix > simple_identifier(keys)
+      const obj = child.firstNamedChild;
+      if (obj?.type === 'simple_identifier') iterableName = obj.text;
+      const suffix = findChildByType(child, 'navigation_suffix');
+      if (suffix) {
+        const prop = findChildByType(suffix, 'simple_identifier');
+        if (prop) methodName = prop.text;
+      }
+      break;
+    }
+    if (child.type === 'call_expression') {
+      // data.values() → call_expression > navigation_expression > simple_identifier + navigation_suffix
+      const callee = child.firstNamedChild;
+      if (callee?.type === 'navigation_expression') {
+        const obj = callee.firstNamedChild;
+        if (obj?.type === 'simple_identifier') iterableName = obj.text;
+        const suffix = findChildByType(callee, 'navigation_suffix');
+        if (suffix) {
+          const prop = findChildByType(suffix, 'simple_identifier');
+          if (prop) methodName = prop.text;
+        }
+      }
       break;
     }
   }
   if (!iterableName) return;
 
+  const containerTypeName = scopeEnv.get(iterableName);
+  const typeArgPos = methodToTypeArgPosition(methodName, containerTypeName);
   const elementType = resolveIterableElementType(
     iterableName, node, scopeEnv, declarationTypeNodes, scope,
     extractKotlinElementTypeFromTypeNode, findKotlinParamElementType,
+    typeArgPos,
   );
   if (elementType) scopeEnv.set(varName, elementType);
 };

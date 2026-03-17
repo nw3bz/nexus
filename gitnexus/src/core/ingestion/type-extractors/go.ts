@@ -1,6 +1,6 @@
 import type { SyntaxNode } from '../utils.js';
 import type { ConstructorBindingScanner, ForLoopExtractor, LanguageTypeConfig, ParameterExtractor, TypeBindingExtractor, PendingAssignmentExtractor } from './types.js';
-import { extractSimpleTypeName, extractVarName, extractElementTypeFromString, findChildByType, resolveIterableElementType } from './shared.js';
+import { extractSimpleTypeName, extractVarName, extractElementTypeFromString, extractGenericTypeArgs, findChildByType, resolveIterableElementType, methodToTypeArgPosition, type TypeArgPosition } from './shared.js';
 
 const DECLARATION_NODE_TYPES: ReadonlySet<string> = new Set([
   'var_declaration',
@@ -197,7 +197,7 @@ const GO_FUNCTION_NODE_TYPES = new Set([
  *   array_type "[10]User" →  element field → type_identifier "User"
  * Falls back to text-based extraction via extractElementTypeFromString.
  */
-const extractGoElementTypeFromTypeNode = (typeNode: SyntaxNode): string | undefined => {
+const extractGoElementTypeFromTypeNode = (typeNode: SyntaxNode, pos: TypeArgPosition = 'last'): string | undefined => {
   // slice_type: []User — element field is the element type
   if (typeNode.type === 'slice_type' || typeNode.type === 'array_type') {
     const elemNode = typeNode.childForFieldName('element');
@@ -213,8 +213,14 @@ const extractGoElementTypeFromTypeNode = (typeNode: SyntaxNode): string | undefi
     const valueNode = typeNode.childForFieldName('value') ?? typeNode.lastNamedChild;
     if (valueNode) return extractSimpleTypeName(valueNode);
   }
+  // generic_type: Go 1.18+ generics (e.g., MySlice[User], Cache[string, User])
+  // Use position-aware arg selection: 'first' for keys, 'last' for values.
+  if (typeNode.type === 'generic_type') {
+    const args = extractGenericTypeArgs(typeNode);
+    if (args.length >= 1) return pos === 'first' ? args[0] : args[args.length - 1];
+  }
   // Fallback: text-based extraction ([]User → User, User[] → User)
-  return extractElementTypeFromString(typeNode.text);
+  return extractElementTypeFromString(typeNode.text, pos);
 };
 
 /** Check if a Go type node represents a channel type. Used to determine
@@ -242,7 +248,7 @@ const isChannelType = (
  *   name field: identifier (the parameter name)
  *   type field: the type node (slice_type for []User)
  */
-const findGoParamElementType = (iterableName: string, startNode: SyntaxNode): string | undefined => {
+const findGoParamElementType = (iterableName: string, startNode: SyntaxNode, pos: TypeArgPosition = 'last'): string | undefined => {
   let current: SyntaxNode | null = startNode.parent;
   while (current) {
     if (GO_FUNCTION_NODE_TYPES.has(current.type)) {
@@ -255,7 +261,7 @@ const findGoParamElementType = (iterableName: string, startNode: SyntaxNode): st
           const nameNode = paramDecl.childForFieldName('name');
           if (nameNode?.text === iterableName) {
             const typeNode = paramDecl.childForFieldName('type');
-            if (typeNode) return extractGoElementTypeFromTypeNode(typeNode);
+            if (typeNode) return extractGoElementTypeFromTypeNode(typeNode, pos);
           }
         }
       }
@@ -304,9 +310,12 @@ const extractForLoopBinding: ForLoopExtractor = (
   if (!rightNode || rightNode.type !== 'identifier') return;
   const iterableName = rightNode.text;
 
+  const containerTypeName = scopeEnv.get(iterableName);
+  const typeArgPos = methodToTypeArgPosition(undefined, containerTypeName);
   const elementType = resolveIterableElementType(
     iterableName, node, scopeEnv, declarationTypeNodes, scope,
     extractGoElementTypeFromTypeNode, findGoParamElementType,
+    typeArgPos,
   );
   if (!elementType) return;
 

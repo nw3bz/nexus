@@ -1077,3 +1077,38 @@ describe('C# switch pattern type resolution', () => {
     expect(repoSave).toBeDefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// C# Dictionary .Values foreach — member_access_expression resolution
+// ---------------------------------------------------------------------------
+
+describe('C# Dictionary .Values foreach resolution', () => {
+  let result: PipelineResult;
+
+  beforeAll(async () => {
+    result = await runPipelineFromRepo(
+      path.join(FIXTURES, 'csharp-dictionary-keys-values'),
+      () => {},
+    );
+  }, 60000);
+
+  it('detects User class with Save method', () => {
+    expect(getNodesByLabel(result, 'Class')).toContain('User');
+  });
+
+  it('resolves user.Save() via Dictionary.Values to User#Save', () => {
+    const calls = getRelationships(result, 'CALLS');
+    const userSave = calls.find(c =>
+      c.target === 'Save' && c.source === 'ProcessValues' && c.targetFilePath?.includes('User'),
+    );
+    expect(userSave).toBeDefined();
+  });
+
+  it('does NOT resolve user.Save() to Repo#Save (negative)', () => {
+    const calls = getRelationships(result, 'CALLS');
+    const wrongSave = calls.find(c =>
+      c.target === 'Save' && c.source === 'ProcessValues' && c.targetFilePath?.includes('Repo'),
+    );
+    expect(wrongSave).toBeUndefined();
+  });
+});
