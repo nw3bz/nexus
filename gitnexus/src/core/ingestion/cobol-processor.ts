@@ -183,23 +183,35 @@ export const processCobol = (
   // (target = <unresolved>:PROGNAME) because later programs haven't
   // been registered in moduleNodeIds yet. Now that ALL programs are
   // processed, re-scan unresolved CALLS edges and patch them.
+  // This covers both `cobol-call-unresolved` and CICS LINK/XCTL edges
+  // whose targets contain `<unresolved>:`.
   graph.forEachRelationship(rel => {
-    if (rel.type === 'CALLS' && rel.reason?.startsWith('cobol-call-unresolved')) {
-      // Extract the program name from the synthetic target ID
-      const match = rel.targetId.match(/<unresolved>:(.+)/);
-      if (!match) return;
-      const resolvedId = moduleNodeIds.get(match[1]);
-      if (resolvedId) {
-        // Replace with resolved edge (can't mutate, so add new + mark old)
-        graph.addRelationship({
-          id: rel.id + ':resolved',
-          type: 'CALLS',
-          sourceId: rel.sourceId,
-          targetId: resolvedId,
-          confidence: 0.95,
-          reason: 'cobol-call',
-        });
-      }
+    if (rel.type !== 'CALLS') return;
+    const match = rel.targetId.match(/<unresolved>:(.+)/);
+    if (!match) return;
+    const resolvedId = moduleNodeIds.get(match[1]);
+    if (!resolvedId) return;
+
+    if (rel.reason?.startsWith('cobol-call-unresolved')) {
+      // Replace unresolved CALL with resolved edge
+      graph.addRelationship({
+        id: rel.id + ':resolved',
+        type: 'CALLS',
+        sourceId: rel.sourceId,
+        targetId: resolvedId,
+        confidence: 0.95,
+        reason: 'cobol-call',
+      });
+    } else if (rel.reason === 'cics-link-unresolved' || rel.reason === 'cics-xctl-unresolved') {
+      // Replace unresolved CICS LINK/XCTL with resolved edge
+      graph.addRelationship({
+        id: rel.id + ':resolved',
+        type: 'CALLS',
+        sourceId: rel.sourceId,
+        targetId: resolvedId,
+        confidence: 0.95,
+        reason: rel.reason.replace('-unresolved', ''),
+      });
     }
   });
 
@@ -493,15 +505,17 @@ function mapToGraph(
     });
     // LINK/XCTL -> cross-program CALLS
     if (cics.programName && (cics.command === 'LINK' || cics.command === 'XCTL')) {
-      const targetId = moduleNodeIds.get(cics.programName.toUpperCase())
+      const cicsTargetModuleId = moduleNodeIds.get(cics.programName.toUpperCase());
+      const targetId = cicsTargetModuleId
         ?? generateId('Module', `<unresolved>:${cics.programName.toUpperCase()}`);
+      const cicsReason = `cics-${cics.command.toLowerCase()}`;
       graph.addRelationship({
         id: generateId('CALLS', `${parentId}->cics-${cics.command.toLowerCase()}->${cics.programName}:L${cics.line}`),
         type: 'CALLS',
         sourceId: parentId,
         targetId,
-        confidence: 0.95,
-        reason: `cics-${cics.command.toLowerCase()}`,
+        confidence: cicsTargetModuleId ? 0.95 : 0.5,
+        reason: cicsTargetModuleId ? cicsReason : `${cicsReason}-unresolved`,
       });
     }
   }
