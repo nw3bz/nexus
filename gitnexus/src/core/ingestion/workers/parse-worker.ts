@@ -21,6 +21,10 @@ const _require = createRequire(import.meta.url);
 let Swift: any = null;
 try { Swift = _require('tree-sitter-swift'); } catch {}
 
+// tree-sitter-dart is an optionalDependency — may not be installed
+let Dart: any = null;
+try { Dart = _require('tree-sitter-dart'); } catch {}
+
 // tree-sitter-kotlin is an optionalDependency — may not be installed
 let Kotlin: any = null;
 try { Kotlin = _require('tree-sitter-kotlin'); } catch {}
@@ -181,6 +185,14 @@ export interface ExtractedToolDef {
   lineNumber: number;
 }
 
+export interface ExtractedORMQuery {
+  filePath: string;
+  orm: 'prisma' | 'supabase';
+  model: string;
+  method: string;
+  lineNumber: number;
+}
+
 /** Constructor bindings keyed by filePath for cross-file type resolution */
 export interface FileConstructorBindings {
   filePath: string;
@@ -206,6 +218,7 @@ export interface ParseWorkerResult {
   fetchCalls: ExtractedFetchCall[];
   decoratorRoutes: ExtractedDecoratorRoute[];
   toolDefs: ExtractedToolDef[];
+  ormQueries: ExtractedORMQuery[];
   constructorBindings: FileConstructorBindings[];
   /** File-scope type bindings from TypeEnv fixpoint for exported symbol collection. */
   typeEnvBindings: FileTypeEnvBindings[];
@@ -238,6 +251,7 @@ const languageMap: Record<string, any> = {
   ...(Kotlin ? { [SupportedLanguages.Kotlin]: Kotlin } : {}),
   [SupportedLanguages.PHP]: PHP.php_only,
   [SupportedLanguages.Ruby]: Ruby,
+  ...(Dart ? { [SupportedLanguages.Dart]: Dart } : {}),
   ...(Swift ? { [SupportedLanguages.Swift]: Swift } : {}),
 };
 
@@ -353,6 +367,7 @@ const processBatch = (files: ParseWorkerInput[], onProgress?: (filesProcessed: n
     fetchCalls: [],
     decoratorRoutes: [],
     toolDefs: [],
+    ormQueries: [],
     constructorBindings: [],
     typeEnvBindings: [],
     skippedLanguages: {},
@@ -823,6 +838,53 @@ function extractLaravelRoutes(tree: any, filePath: string): ExtractedRoute[] {
 
   walk(tree.rootNode, []);
   return routes;
+}
+
+// ============================================================================
+// ORM Query Detection (Prisma + Supabase)
+// ============================================================================
+
+const PRISMA_QUERY_RE = /\bprisma\.(\w+)\.(findMany|findFirst|findUnique|findUniqueOrThrow|findFirstOrThrow|create|createMany|update|updateMany|delete|deleteMany|upsert|count|aggregate|groupBy)\s*\(/g;
+const SUPABASE_QUERY_RE = /\bsupabase\.from\s*\(\s*['"](\w+)['"]\s*\)\s*\.(select|insert|update|delete|upsert)\s*\(/g;
+
+/**
+ * Extract ORM query calls from file content via regex.
+ * Appends results to the provided array (avoids allocation when no matches).
+ */
+export function extractORMQueries(filePath: string, content: string, out: ExtractedORMQuery[]): void {
+  const hasPrisma = content.includes('prisma.');
+  const hasSupabase = content.includes('supabase.from');
+  if (!hasPrisma && !hasSupabase) return;
+
+  if (hasPrisma) {
+    PRISMA_QUERY_RE.lastIndex = 0;
+    let m;
+    while ((m = PRISMA_QUERY_RE.exec(content)) !== null) {
+      const model = m[1];
+      if (model.startsWith('$')) continue;
+      out.push({
+        filePath,
+        orm: 'prisma',
+        model,
+        method: m[2],
+        lineNumber: content.substring(0, m.index).split('\n').length - 1,
+      });
+    }
+  }
+
+  if (hasSupabase) {
+    SUPABASE_QUERY_RE.lastIndex = 0;
+    let m;
+    while ((m = SUPABASE_QUERY_RE.exec(content)) !== null) {
+      out.push({
+        filePath,
+        orm: 'supabase',
+        model: m[1],
+        method: m[2],
+        lineNumber: content.substring(0, m.index).split('\n').length - 1,
+      });
+    }
+  }
 }
 
 const processFileGroup = (
@@ -1346,6 +1408,9 @@ const processFileGroup = (
       const extractedRoutes = extractLaravelRoutes(tree, file.path);
       result.routes.push(...extractedRoutes);
     }
+
+    // Extract ORM queries (Prisma, Supabase)
+    extractORMQueries(file.path, file.content, result.ormQueries);
   }
 };
 
@@ -1356,7 +1421,7 @@ const processFileGroup = (
 /** Accumulated result across sub-batches */
 let accumulated: ParseWorkerResult = {
   nodes: [], relationships: [], symbols: [],
-  imports: [], calls: [], assignments: [], heritage: [], routes: [], fetchCalls: [], decoratorRoutes: [], toolDefs: [], constructorBindings: [], typeEnvBindings: [], skippedLanguages: {}, fileCount: 0,
+  imports: [], calls: [], assignments: [], heritage: [], routes: [], fetchCalls: [], decoratorRoutes: [], toolDefs: [], ormQueries: [], constructorBindings: [], typeEnvBindings: [], skippedLanguages: {}, fileCount: 0,
 };
 let cumulativeProcessed = 0;
 
@@ -1372,6 +1437,7 @@ const mergeResult = (target: ParseWorkerResult, src: ParseWorkerResult) => {
   target.fetchCalls.push(...src.fetchCalls);
   target.decoratorRoutes.push(...src.decoratorRoutes);
   target.toolDefs.push(...src.toolDefs);
+  target.ormQueries.push(...src.ormQueries);
   target.constructorBindings.push(...src.constructorBindings);
   target.typeEnvBindings.push(...src.typeEnvBindings);
   for (const [lang, count] of Object.entries(src.skippedLanguages)) {
@@ -1398,7 +1464,7 @@ parentPort!.on('message', (msg: any) => {
     if (msg && msg.type === 'flush') {
       parentPort!.postMessage({ type: 'result', data: accumulated });
       // Reset for potential reuse
-      accumulated = { nodes: [], relationships: [], symbols: [], imports: [], calls: [], assignments: [], heritage: [], routes: [], fetchCalls: [], decoratorRoutes: [], toolDefs: [], constructorBindings: [], typeEnvBindings: [], skippedLanguages: {}, fileCount: 0 };
+      accumulated = { nodes: [], relationships: [], symbols: [], imports: [], calls: [], assignments: [], heritage: [], routes: [], fetchCalls: [], decoratorRoutes: [], toolDefs: [], ormQueries: [], constructorBindings: [], typeEnvBindings: [], skippedLanguages: {}, fileCount: 0 };
       cumulativeProcessed = 0;
       return;
     }

@@ -81,6 +81,17 @@ export function detectFrameworkFromPath(filePath: string): FrameworkHint | null 
     return { framework: 'expo-router', entryPointMultiplier: 2.5, reason: 'expo-screen' };
   }
 
+  // Prisma schema (ORM data model definition)
+  if (p.includes('/prisma/') && p.endsWith('schema.prisma')) {
+    return { framework: 'prisma', entryPointMultiplier: 1.5, reason: 'prisma-schema' };
+  }
+
+  // Supabase client files
+  if ((p.includes('/lib/supabase') || p.includes('/utils/supabase') || p.includes('/supabase/')) &&
+      (p.endsWith('.ts') || p.endsWith('.js'))) {
+    return { framework: 'supabase', entryPointMultiplier: 1.5, reason: 'supabase-client' };
+  }
+
   // Express / Node.js routes
   if (p.includes('/routes/') && (p.endsWith('.ts') || p.endsWith('.js'))) {
     return { framework: 'express', entryPointMultiplier: 2.5, reason: 'routes-folder' };
@@ -406,6 +417,38 @@ export function detectFrameworkFromPath(filePath: string): FrameworkHint | null 
     return { framework: 'ios-router', entryPointMultiplier: 2.0, reason: 'ios-router' };
   }
 
+  // ========== DART / FLUTTER ==========
+
+  // Flutter main/app entry points
+  if (p.endsWith('/main.dart') || p.endsWith('/app.dart')) {
+    return { framework: 'flutter', entryPointMultiplier: 3.0, reason: 'flutter-main' };
+  }
+
+  // Flutter screens/pages/views (high priority - route entry points)
+  if ((p.includes('/screens/') || p.includes('/pages/') || p.includes('/views/')) && p.endsWith('.dart')) {
+    return { framework: 'flutter', entryPointMultiplier: 2.5, reason: 'flutter-screen' };
+  }
+
+  // Flutter routes
+  if (p.includes('/routes/') && p.endsWith('.dart')) {
+    return { framework: 'flutter', entryPointMultiplier: 2.5, reason: 'flutter-routes' };
+  }
+
+  // Flutter BLoC / controllers / presentation (state management entry points)
+  if ((p.includes('/bloc/') || p.includes('/controllers/') || p.includes('/cubit/') || p.includes('/presentation/')) && p.endsWith('.dart')) {
+    return { framework: 'flutter', entryPointMultiplier: 2.0, reason: 'flutter-state-management' };
+  }
+
+  // Flutter services / domain
+  if ((p.includes('/services/') || p.includes('/domain/')) && p.endsWith('.dart')) {
+    return { framework: 'flutter', entryPointMultiplier: 1.8, reason: 'flutter-service' };
+  }
+
+  // Flutter widgets (reusable components)
+  if (p.includes('/widgets/') && p.endsWith('.dart')) {
+    return { framework: 'flutter', entryPointMultiplier: 1.5, reason: 'flutter-widget' };
+  }
+
   // ========== GENERIC PATTERNS ==========
 
   // Any language: index files in API folders
@@ -456,6 +499,10 @@ export const FRAMEWORK_AST_PATTERNS = {
   'fiber': ['fiber.Ctx', 'fiber.New', 'fiber.App'],
   'go-grpc': ['grpc.Server', 'RegisterServer', 'pb.Unimplemented'],
 
+  // ORM patterns
+  'prisma': ['prisma.', 'PrismaClient', '@prisma/client'],
+  'supabase': ['supabase.from', 'createClient', '@supabase/supabase-js'],
+
   // PHP/Laravel
   'laravel': ['Route::get', 'Route::post', 'Route::put', 'Route::delete',
               'Route::resource', 'Route::apiResource', '#[Route('],
@@ -478,6 +525,11 @@ export const FRAMEWORK_AST_PATTERNS = {
   'rails': ['ApplicationController', 'ApplicationRecord', 'ActiveRecord::Base',
             'before_action', 'after_action', 'has_many', 'belongs_to', 'has_one', 'validates'],
   'sinatra': ['Sinatra::Base', 'Sinatra::Application'],
+
+  // Dart/Flutter
+  'flutter': ['StatelessWidget', 'StatefulWidget', 'BuildContext', 'Widget build',
+              'ChangeNotifier', 'GetxController', 'Cubit<', 'Bloc<', 'ConsumerWidget'],
+  'riverpod': ['@riverpod', 'ref.watch', 'ref.read', 'AsyncNotifier', 'Notifier'],
 };
 
 interface AstFrameworkPatternConfig {
@@ -544,6 +596,10 @@ export const AST_FRAMEWORK_PATTERNS_BY_LANGUAGE = {
   [SupportedLanguages.Ruby]: [
     { framework: 'rails', entryPointMultiplier: 3.0, reason: 'rails-pattern', patterns: FRAMEWORK_AST_PATTERNS.rails },
     { framework: 'sinatra', entryPointMultiplier: 2.8, reason: 'sinatra-pattern', patterns: FRAMEWORK_AST_PATTERNS.sinatra },
+  ],
+  [SupportedLanguages.Dart]: [
+    { framework: 'flutter', entryPointMultiplier: 2.5, reason: 'flutter-widget', patterns: FRAMEWORK_AST_PATTERNS.flutter },
+    { framework: 'riverpod', entryPointMultiplier: 2.8, reason: 'riverpod-pattern', patterns: FRAMEWORK_AST_PATTERNS.riverpod },
   ],
 } satisfies Record<SupportedLanguages, AstFrameworkPatternConfig[]>;
 
