@@ -2,18 +2,6 @@
 
 All notable changes to GitNexus will be documented in this file.
 
-## [Unreleased]
-
-### Added
-- Phase 8: Field and Property Type Resolution
-  - Field-type maps for TypeScript class/interface declarations
-  - Language-agnostic FieldExtractor interface and registry
-  - Chained property resolution support
-- Phase 9: Return-Type-Aware Variable Binding
-  - Call-result variable binding in TypeEnv
-  - FQN-aware return type lookup
-  - Enhanced pending assignment processing
-
 ## [1.4.8] - 2026-03-23
 
 ### Added

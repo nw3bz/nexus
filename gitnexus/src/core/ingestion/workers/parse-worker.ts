@@ -1044,8 +1044,8 @@ const processFileGroup = (
     // Build per-file type environment + constructor bindings in a single AST walk.
     // Constructor bindings are verified against the SymbolTable in processCallsFromExtracted.
     const parentMap: ReadonlyMap<string, readonly string[]> = fileParentMap;
-    const typeEnv = buildTypeEnv(tree, language, { parentMap });
     const provider = getProvider(language);
+    const typeEnv = buildTypeEnv(tree, language, { parentMap, enclosingFunctionFinder: provider?.enclosingFunctionFinder });
     const callRouter = provider.callRouter;
 
     if (typeEnv.constructorBindings.length > 0) {
