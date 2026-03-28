@@ -1,6 +1,6 @@
 /**
  * Wiki Command
- *
+ * 
  * Generates repository documentation from the knowledge graph.
  * Usage: gitnexus wiki [path] [options]
  */
@@ -10,12 +10,7 @@ import readline from 'readline';
 import { execSync, execFileSync } from 'child_process';
 import cliProgress from 'cli-progress';
 import { getGitRoot, isGitRepo } from '../storage/git.js';
-import {
-  getStoragePaths,
-  loadMeta,
-  loadCLIConfig,
-  saveCLIConfig,
-} from '../storage/repo-manager.js';
+import { getStoragePaths, loadMeta, loadCLIConfig, saveCLIConfig } from '../storage/repo-manager.js';
 import { WikiGenerator, type WikiOptions } from '../core/wiki/generator.js';
 import { resolveLLMConfig, type LLMProvider } from '../core/wiki/llm-client.js';
 import { detectCursorCLI } from '../core/wiki/cursor-client.js';
@@ -83,7 +78,10 @@ function prompt(question: string, hide = false): Promise<string> {
   });
 }
 
-export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptions) => {
+export const wikiCommand = async (
+  inputPath?: string,
+  options?: WikiCommandOptions,
+) => {
   // Set verbose mode globally for cursor-client to pick up
   if (options?.verbose) {
     process.env.GITNEXUS_VERBOSE = '1';
@@ -143,16 +141,8 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
   }
 
   const savedConfig = await loadCLIConfig();
-  const hasSavedConfig = !!(
-    savedConfig.provider === 'cursor' ||
-    (savedConfig.apiKey && savedConfig.baseUrl)
-  );
-  const hasCLIOverrides = !!(
-    options?.apiKey ||
-    options?.model ||
-    options?.baseUrl ||
-    options?.provider
-  );
+  const hasSavedConfig = !!(savedConfig.provider === 'cursor' || (savedConfig.apiKey && savedConfig.baseUrl));
+  const hasCLIOverrides = !!(options?.apiKey || options?.model || options?.baseUrl || options?.provider);
 
   let llmConfig = await resolveLLMConfig({
     model: options?.model,
@@ -175,8 +165,8 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
       }
       // Non-interactive with env var or cursor — just use it
     } else {
-      console.log("  No LLM configured. Let's set it up.\n");
-      console.log('  Supports OpenAI, OpenRouter, any OpenAI-compatible API, or Cursor CLI.\n');
+      console.log('  No LLM configured. Let\'s set it up.\n');
+      console.log('  Supports OpenAI, OpenRouter, Azure, any OpenAI-compatible API, or Cursor CLI.\n');
 
       // Check if Cursor CLI is available
       const hasCursor = detectCursorCLI();
@@ -184,13 +174,14 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
       // Provider selection
       console.log('  [1] OpenAI (api.openai.com)');
       console.log('  [2] OpenRouter (openrouter.ai)');
-      console.log('  [3] Custom endpoint');
+      console.log('  [3] Azure OpenAI');
+      console.log('  [4] Custom endpoint');
       if (hasCursor) {
-        console.log('  [4] Cursor CLI (local, uses your Cursor subscription)');
+        console.log('  [5] Cursor CLI (local, uses your Cursor subscription)');
       }
       console.log('');
 
-      const maxChoice = hasCursor ? '4' : '3';
+      const maxChoice = hasCursor ? '5' : '4';
       const choice = await prompt(`  Select provider (1/${maxChoice}): `);
 
       let baseUrl: string;
@@ -198,7 +189,7 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
       let provider: LLMProvider = 'openai';
       let key = '';
 
-      if (choice === '4' && hasCursor) {
+      if (choice === '5' && hasCursor) {
         // Cursor CLI selected - model defaults to 'auto' (Cursor's default)
         provider = 'cursor';
         baseUrl = '';
@@ -213,12 +204,93 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
         console.log('  Config saved to ~/.gitnexus/config.json\n');
 
         llmConfig = { ...llmConfig, provider: 'cursor', model, apiKey: '', baseUrl: '' };
+      } else if (choice === '3') {
+        // Azure OpenAI guided setup
+        console.log('\n  Azure OpenAI setup.');
+        console.log('  You need: your resource name, deployment name, and API key from the Azure portal.\n');
+
+        const resourceName = await prompt('  Azure resource name (e.g. my-openai-resource): ');
+        if (!resourceName) {
+          console.log('\n  No resource name provided. Aborting.\n');
+          process.exitCode = 1;
+          return;
+        }
+
+        const deploymentName = await prompt('  Deployment name (the name you gave your model deployment): ');
+        if (!deploymentName) {
+          console.log('\n  No deployment name provided. Aborting.\n');
+          process.exitCode = 1;
+          return;
+        }
+
+        // Offer v1 or legacy URL
+        console.log('\n  API format:');
+        console.log('  [1] v1 API — recommended (no api-version needed)');
+        console.log('  [2] Legacy — uses api-version query param\n');
+        const apiFormat = await prompt('  Select format (1/2, default: 1): ');
+
+        let azureApiVersion: string | undefined;
+        let azureBaseUrl: string;
+        if (apiFormat === '2') {
+          const versionInput = await prompt('  api-version (default: 2024-10-21): ');
+          azureApiVersion = versionInput || '2024-10-21';
+          azureBaseUrl = `https://${resourceName}.openai.azure.com/openai/deployments/${deploymentName}`;
+        } else {
+          azureBaseUrl = `https://${resourceName}.openai.azure.com/openai/v1`;
+          azureApiVersion = undefined;
+        }
+
+        defaultModel = deploymentName;
+
+        // Ask if this is a reasoning model deployment
+        const reasoningAnswer = await prompt('  Is this a reasoning model (o1, o3, o4-mini)? (y/N): ');
+        const isReasoningModelDeployment = (reasoningAnswer.toLowerCase() === 'y' || reasoningAnswer.toLowerCase() === 'yes') ? true : undefined;
+
+        if (isReasoningModelDeployment) {
+          console.log('  Note: temperature and max_tokens will be omitted for this deployment.\n');
+        }
+
+        const modelInput = await prompt(`  Model / deployment name (default: ${defaultModel}): `);
+        const model = modelInput || defaultModel;
+
+        // API key
+        const envKey = process.env.GITNEXUS_API_KEY || process.env.OPENAI_API_KEY || '';
+        let azureKey: string;
+        if (envKey) {
+          const masked = envKey.slice(0, 6) + '...' + envKey.slice(-4);
+          const useEnv = await prompt(`  Use existing env key (${masked})? (Y/n): `);
+          if (!useEnv || useEnv.toLowerCase() === 'y' || useEnv.toLowerCase() === 'yes') {
+            azureKey = envKey;
+          } else {
+            azureKey = await prompt('  API key: ', true);
+          }
+        } else {
+          azureKey = await prompt('  API key: ', true);
+        }
+
+        if (!azureKey) {
+          console.log('\n  No key provided. Aborting.\n');
+          process.exitCode = 1;
+          return;
+        }
+
+        // Save Azure config including optional apiVersion and isReasoningModel
+        const azureConfig: Parameters<typeof saveCLIConfig>[0] = {
+          apiKey: azureKey, baseUrl: azureBaseUrl, model, provider: 'azure',
+        };
+        if (azureApiVersion) azureConfig.apiVersion = azureApiVersion;
+        if (isReasoningModelDeployment !== undefined) azureConfig.isReasoningModel = isReasoningModelDeployment;
+        await saveCLIConfig(azureConfig);
+        console.log('  Config saved to ~/.gitnexus/config.json\n');
+
+        llmConfig = { ...llmConfig, apiKey: azureKey, baseUrl: azureBaseUrl, model, provider: 'azure', apiVersion: azureApiVersion, isReasoningModel: isReasoningModelDeployment };
       } else {
-        // OpenAI-compatible provider
+        // OpenAI-compatible provider (OpenAI, OpenRouter, Custom)
         if (choice === '2') {
           baseUrl = 'https://openrouter.ai/api/v1';
           defaultModel = 'minimax/minimax-m2.5';
-        } else if (choice === '3') {
+          provider = 'openrouter';
+        } else if (choice === '4') {
           baseUrl = await prompt('  Base URL (e.g. http://localhost:11434/v1): ');
           if (!baseUrl) {
             console.log('\n  No URL provided. Aborting.\n');
@@ -226,9 +298,11 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
             return;
           }
           defaultModel = 'gpt-4o-mini';
+          provider = 'custom';
         } else {
           baseUrl = 'https://api.openai.com/v1';
           defaultModel = 'gpt-4o-mini';
+          provider = 'openai';
         }
 
         // Model
@@ -256,28 +330,25 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
         }
 
         // Save
-        await saveCLIConfig({ apiKey: key, baseUrl, model, provider: 'openai' });
+        await saveCLIConfig({ apiKey: key, baseUrl, model, provider });
         console.log('  Config saved to ~/.gitnexus/config.json\n');
 
-        llmConfig = { ...llmConfig, apiKey: key, baseUrl, model, provider: 'openai' };
+        llmConfig = { ...llmConfig, apiKey: key, baseUrl, model, provider };
       }
     }
   }
 
   // ── Setup progress bar with elapsed timer ──────────────────────────
-  const bar = new cliProgress.SingleBar(
-    {
-      format: '  {bar} {percentage}% | {phase}',
-      barCompleteChar: '\u2588',
-      barIncompleteChar: '\u2591',
-      hideCursor: true,
-      barGlue: '',
-      autopadding: true,
-      clearOnComplete: false,
-      stopOnComplete: false,
-    },
-    cliProgress.Presets.shades_grey,
-  );
+  const bar = new cliProgress.SingleBar({
+    format: '  {bar} {percentage}% | {phase}',
+    barCompleteChar: '\u2588',
+    barIncompleteChar: '\u2591',
+    hideCursor: true,
+    barGlue: '',
+    autopadding: true,
+    clearOnComplete: false,
+    stopOnComplete: false,
+  }, cliProgress.Presets.shades_grey);
 
   bar.start(100, 0, { phase: 'Initializing...' });
 
@@ -334,18 +405,13 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
     if (options?.review && result.moduleTree) {
       console.log(`\n  Module structure ready for review (${elapsed}s)\n`);
       console.log('  Modules to generate:\n');
-
+      
       const printTree = (nodes: typeof result.moduleTree, indent = 0) => {
         for (const node of nodes) {
           const prefix = '  '.repeat(indent + 2);
           const fileCount = node.files?.length || 0;
           const childCount = node.children?.length || 0;
-          const suffix =
-            fileCount > 0
-              ? ` (${fileCount} files)`
-              : childCount > 0
-                ? ` (${childCount} children)`
-                : '';
+          const suffix = fileCount > 0 ? ` (${fileCount} files)` : childCount > 0 ? ` (${childCount} children)` : '';
           console.log(`${prefix}- ${node.name}${suffix}`);
           if (node.children && node.children.length > 0) {
             printTree(node.children, indent + 1);
@@ -353,10 +419,10 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
         }
       };
       printTree(result.moduleTree);
-
+      
       console.log(`\n  Tree saved to: ${treeFile}`);
       console.log('  You can edit this file to remove/rename modules.\n');
-
+      
       // Ask for confirmation (auto-continue in non-interactive environments)
       if (!process.stdin.isTTY) {
         console.log('  Non-interactive mode — auto-continuing with generation.\n');
@@ -365,18 +431,18 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
         ? await prompt('  Continue with generation? (Y/n/edit): ')
         : 'y';
       const choice = answer.trim().toLowerCase();
-
+      
       if (choice === 'n' || choice === 'no') {
         console.log('\n  Generation cancelled. Run `gitnexus wiki` later to generate.\n');
         return;
       }
-
+      
       if (choice === 'edit' || choice === 'e') {
         // Open editor for the user
         const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
         console.log(`\n  Opening ${treeFile} in ${editor}...`);
         console.log('  Save and close the editor when done.\n');
-
+        
         try {
           execSync(`${editor} "${treeFile}"`, { stdio: 'inherit' });
         } catch {
@@ -385,17 +451,17 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
           return;
         }
       }
-
+      
       // Continue with generation using the (possibly edited) tree
       console.log('\n  Continuing with wiki generation...\n');
       bar.start(100, 30, { phase: 'Generating pages...' });
-
+      
       // Re-run generator without reviewOnly flag
       const continueOptions: WikiOptions = {
         ...wikiOptions,
         reviewOnly: false,
       };
-
+      
       const continueGenerator = new WikiGenerator(
         repoPath,
         storagePath,
@@ -411,26 +477,26 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
           bar.update(percent, { phase: label });
         },
       );
-
+      
       const continueResult = await continueGenerator.run();
-
+      
       bar.update(100, { phase: 'Done' });
       bar.stop();
-
+      
       const totalElapsed = ((Date.now() - t0) / 1000).toFixed(1);
       console.log(`\n  Wiki generated successfully (${totalElapsed}s)\n`);
       console.log(`  Mode: ${continueResult.mode}`);
       console.log(`  Pages: ${continueResult.pagesGenerated}`);
       console.log(`  Output: ${wikiDir}`);
       console.log(`  Viewer: ${viewerPath}`);
-
+      
       if (continueResult.failedModules && continueResult.failedModules.length > 0) {
         console.log(`\n  Failed modules (${continueResult.failedModules.length}):`);
         for (const mod of continueResult.failedModules) {
           console.log(`    - ${mod}`);
         }
       }
-
+      
       console.log('');
       await maybePublishGist(viewerPath, options?.gist);
       return;
@@ -468,23 +534,21 @@ export const wikiCommand = async (inputPath?: string, options?: WikiCommandOptio
 
     if (err.message?.includes('No source files')) {
       console.log(`\n  ${err.message}\n`);
+    } else if (err.message?.includes('content filter')) {
+      // Content filter block — actionable message
+      console.log(`\n  Content Filter: ${err.message}\n`);
+      console.log('  To resolve: rephrase your prompt or adjust the content filter policy for your deployment.\n');
     } else if (err.message?.includes('API key') || err.message?.includes('API error')) {
       console.log(`\n  LLM Error: ${err.message}\n`);
 
       // Offer to reconfigure on auth-related failures
-      const isAuthError =
-        err.message?.includes('401') ||
-        err.message?.includes('403') ||
-        err.message?.includes('502') ||
-        err.message?.includes('authenticate') ||
-        err.message?.includes('Unauthorized');
+      const isAuthError = err.message?.includes('401') || err.message?.includes('403')
+        || err.message?.includes('502') || err.message?.includes('authenticate')
+        || err.message?.includes('Unauthorized');
       if (isAuthError && process.stdin.isTTY) {
         const answer = await new Promise<string>((resolve) => {
           const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-          rl.question('  Reconfigure LLM settings? (Y/n): ', (ans) => {
-            rl.close();
-            resolve(ans.trim().toLowerCase());
-          });
+          rl.question('  Reconfigure LLM settings? (Y/n): ', (ans) => { rl.close(); resolve(ans.trim().toLowerCase()); });
         });
         if (!answer || answer === 'y' || answer === 'yes') {
           // Clear saved config so next run triggers interactive setup
@@ -515,15 +579,15 @@ function hasGhCLI(): boolean {
 
 function publishGist(htmlPath: string): { url: string; rawUrl: string } | null {
   try {
-    const output = execFileSync(
-      'gh',
-      ['gist', 'create', htmlPath, '--desc', 'Repository Wiki — generated by GitNexus', '--public'],
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
-    ).trim();
+    const output = execFileSync('gh', [
+      'gist', 'create', htmlPath,
+      '--desc', 'Repository Wiki — generated by GitNexus',
+      '--public',
+    ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 
     // gh gist create prints the gist URL as the last line
     const lines = output.split('\n');
-    const gistUrl = lines.find((l) => l.includes('gist.github.com')) || lines[lines.length - 1];
+    const gistUrl = lines.find(l => l.includes('gist.github.com')) || lines[lines.length - 1];
 
     if (!gistUrl || !gistUrl.includes('gist.github.com')) return null;
 
