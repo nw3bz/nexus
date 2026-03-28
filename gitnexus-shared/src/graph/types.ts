@@ -78,6 +78,9 @@ export type NodeProperties = {
   visibility?: string;
   isStatic?: boolean;
   isReadonly?: boolean;
+  isAbstract?: boolean;
+  isFinal?: boolean;
+  annotations?: string[];
   // Route/response
   responseKeys?: string[];
   errorKeys?: string[];
