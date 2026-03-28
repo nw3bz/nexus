@@ -343,6 +343,10 @@ describe('Java MethodExtractor', () => {
       expect(result).not.toBeNull();
       const ctor = result!.methods.find((m) => m.name === 'Point');
       expect(ctor).toBeDefined();
+      // Compact constructors inherit parameters from the record components
+      expect(ctor!.parameters).toHaveLength(2);
+      expect(ctor!.parameters[0].name).toBe('x');
+      expect(ctor!.parameters[1].name).toBe('y');
     });
   });
 
@@ -443,6 +447,35 @@ describeKotlin('Kotlin MethodExtractor', () => {
       expect(m.parameters).toHaveLength(1);
       expect(m.parameters[0].name).toBe('messages');
       expect(m.parameters[0].isVariadic).toBe(true);
+    });
+  });
+
+  describe('extension functions', () => {
+    it('extracts receiverType for extension functions', () => {
+      const tree = parseKotlin(`
+        class StringUtils {
+          fun String.addBang(): String = this + "!"
+        }
+      `);
+      const classNode = tree.rootNode.child(0)!;
+      const result = extractor.extract(classNode, kotlinCtx);
+
+      expect(result).not.toBeNull();
+      const m = result!.methods[0];
+      expect(m.name).toBe('addBang');
+      expect(m.receiverType).toBe('String');
+    });
+
+    it('returns null receiverType for regular methods', () => {
+      const tree = parseKotlin(`
+        class Foo {
+          fun bar(): Int = 42
+        }
+      `);
+      const classNode = tree.rootNode.child(0)!;
+      const result = extractor.extract(classNode, kotlinCtx);
+
+      expect(result!.methods[0].receiverType).toBeNull();
     });
   });
 

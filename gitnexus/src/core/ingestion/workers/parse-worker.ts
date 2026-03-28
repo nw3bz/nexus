@@ -122,6 +122,9 @@ interface ParsedSymbol {
   visibility?: string;
   isStatic?: boolean;
   isReadonly?: boolean;
+  isAbstract?: boolean;
+  isFinal?: boolean;
+  annotations?: string[];
 }
 
 export interface ExtractedImport {
@@ -1838,6 +1841,9 @@ const processFileGroup = (
         ...(visibility !== undefined ? { visibility } : {}),
         ...(isStatic !== undefined ? { isStatic } : {}),
         ...(isReadonly !== undefined ? { isReadonly } : {}),
+        ...(isAbstract !== undefined ? { isAbstract } : {}),
+        ...(isFinal !== undefined ? { isFinal } : {}),
+        ...(annotations !== undefined ? { annotations } : {}),
       });
 
       const fileId = generateId('File', file.path);

@@ -83,6 +83,13 @@ function findBodies(node: SyntaxNode, bodyNodeSet: Set<string>): SyntaxNode[] {
     }
   }
   if (result.length === 0 && bodyField) {
+    // Fallback: body field exists but its type is not in bodyNodeTypes.
+    // This may indicate a config typo — log for debugging if NODE_ENV is development.
+    if (process.env.NODE_ENV === 'development') {
+      console.warn(
+        `[MethodExtractor] body field type '${bodyField.type}' not in bodyNodeTypes for node '${node.type}'`,
+      );
+    }
     result.push(bodyField);
     addNestedBodies(bodyField, bodyNodeSet, result);
   }
@@ -146,6 +153,7 @@ function buildMethod(
 
   return {
     name,
+    receiverType: config.extractReceiverType?.(node) ?? null,
     returnType: config.extractReturnType(node) ?? null,
     parameters: config.extractParameters(node),
     visibility: config.extractVisibility(node),

@@ -16,6 +16,7 @@ export interface ParameterInfo {
 
 export interface MethodInfo {
   name: string;
+  receiverType: string | null;
   returnType: string | null;
   parameters: ParameterInfo[];
   visibility: MethodVisibility;
@@ -56,4 +57,5 @@ export interface MethodExtractionConfig {
   isAbstract: (node: SyntaxNode, ownerNode: SyntaxNode) => boolean;
   isFinal: (node: SyntaxNode) => boolean;
   extractAnnotations?: (node: SyntaxNode) => string[];
+  extractReceiverType?: (node: SyntaxNode) => string | undefined;
 }

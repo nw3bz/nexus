@@ -47,7 +47,14 @@ const JAVA_VIS = new Set<MethodVisibility>(['public', 'private', 'protected']);
 
 function extractJavaParameters(node: SyntaxNode): ParameterInfo[] {
   const params: ParameterInfo[] = [];
-  const paramList = node.childForFieldName('parameters');
+  let paramList = node.childForFieldName('parameters');
+  // Compact constructors have no parameter list — inherit from parent record_declaration
+  if (!paramList && node.type === 'compact_constructor_declaration') {
+    const recordNode = node.parent?.parent; // compact_ctor → class_body → record_declaration
+    if (recordNode?.type === 'record_declaration') {
+      paramList = recordNode.childForFieldName('parameters');
+    }
+  }
   if (!paramList) return params;
 
   for (let i = 0; i < paramList.namedChildCount; i++) {
@@ -327,5 +334,19 @@ export const kotlinMethodConfig: MethodExtractionConfig = {
       }
     }
     return annotations;
+  },
+
+  extractReceiverType(node) {
+    // Extension function: user_type appears before the simple_identifier (name)
+    // e.g., fun String.format(template: String) → receiver is "String"
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i);
+      if (!child) continue;
+      if (child.type === 'simple_identifier') break; // past the name — no receiver
+      if (child.type === 'user_type' || child.type === 'nullable_type') {
+        return extractSimpleTypeName(child) ?? child.text?.trim();
+      }
+    }
+    return undefined;
   },
 };
