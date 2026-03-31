@@ -40,6 +40,7 @@ function RepoCard({ repo, onClick }: { repo: BackendRepo; onClick: () => void })
   return (
     <button
       onClick={onClick}
+      data-testid="landing-repo-card"
       className="group w-full cursor-pointer rounded-xl border border-border-default bg-elevated p-4 text-left transition-all duration-200 hover:border-accent/40 hover:bg-hover hover:shadow-glow-soft"
     >
       <div className="flex items-start justify-between gap-3">

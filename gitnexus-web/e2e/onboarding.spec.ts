@@ -15,6 +15,17 @@ import { test, expect } from '@playwright/test';
 
 const BACKEND_URL = 'http://localhost:4747';
 
+async function enterExploringView(page: import('@playwright/test').Page) {
+  await page.goto('/');
+
+  const landingCard = page.locator('[data-testid="landing-repo-card"]').first();
+  if (await landingCard.isVisible({ timeout: 10_000 }).catch(() => false)) {
+    await landingCard.click();
+  }
+
+  await expect(page.locator('[data-testid="status-ready"]')).toBeVisible({ timeout: 30_000 });
+}
+
 // ── Flow 1: Onboarding (no server running) ─────────────────────────────────
 
 test.describe('Flow 1: Onboarding — no server', () => {
@@ -249,10 +260,7 @@ test.describe('Flow 4: Repo dropdown in exploring view', () => {
   });
 
   test('project badge opens repo dropdown', async ({ page }, testInfo) => {
-    await page.goto('/');
-
-    // Wait for auto-connect to finish and exploring view to load
-    await expect(page.locator('[data-testid="status-ready"]')).toBeVisible({ timeout: 30_000 });
+    await enterExploringView(page);
     await page.screenshot({ path: testInfo.outputPath('exploring-loaded.png') });
 
     // Click the project badge (has a chevron)
@@ -269,8 +277,7 @@ test.describe('Flow 4: Repo dropdown in exploring view', () => {
   });
 
   test('analyze option opens inline form', async ({ page }, testInfo) => {
-    await page.goto('/');
-    await expect(page.locator('[data-testid="status-ready"]')).toBeVisible({ timeout: 30_000 });
+    await enterExploringView(page);
 
     // Open repo dropdown
     const badge = page

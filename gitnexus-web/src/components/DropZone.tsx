@@ -152,9 +152,9 @@ export const DropZone = ({ onServerConnect }: DropZoneProps) => {
   // Connection state
   // 'analyze'  = server up but zero repos indexed — show URL input
   // 'landing'  = server up with indexed repos — show repo picker + analyze
-  const [phase, setPhase] = useState<
-    'onboarding' | 'analyze' | 'landing' | 'success' | 'loading'
-  >('onboarding');
+  const [phase, setPhase] = useState<'onboarding' | 'analyze' | 'landing' | 'success' | 'loading'>(
+    'onboarding',
+  );
   const [loadingMessage, setLoadingMessage] = useState('');
   const abortControllerRef = useRef<AbortController | null>(null);
   const [detectedRepos, setDetectedRepos] = useState<BackendRepo[]>([]);
