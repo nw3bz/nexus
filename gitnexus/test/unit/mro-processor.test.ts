@@ -867,5 +867,227 @@ describe('computeMRO', () => {
       });
       expect(implementingMethods).toContain(concreteId);
     });
+
+    describe('METHOD_IMPLEMENTS inherited + arity matching', () => {
+      it('inherited implementation: Base.foo satisfies I.foo when C has no own foo', () => {
+        const graph = createKnowledgeGraph();
+        addClass(graph, 'Base', 'java');
+        addClass(graph, 'I', 'java', 'Interface');
+        addClass(graph, 'C', 'java');
+
+        addExtends(graph, 'C', 'Base');
+        addImplements(graph, 'C', 'I');
+
+        const baseFoo = addMethod(graph, 'Base', 'foo');
+        const iFoo = addMethod(graph, 'I', 'foo', 'Interface');
+
+        const result = computeMRO(graph);
+
+        const edges: any[] = [];
+        graph.forEachRelationship((rel) => {
+          if (rel.type === 'METHOD_IMPLEMENTS') edges.push(rel);
+        });
+
+        expect(edges).toHaveLength(1);
+        expect(edges[0].sourceId).toBe(baseFoo);
+        expect(edges[0].targetId).toBe(iFoo);
+        expect(result.methodImplementsEdges).toBe(1);
+      });
+
+      it('class has own method — no inherited lookup needed', () => {
+        const graph = createKnowledgeGraph();
+        addClass(graph, 'Base2', 'java');
+        addClass(graph, 'I2', 'java', 'Interface');
+        addClass(graph, 'C2', 'java');
+
+        addExtends(graph, 'C2', 'Base2');
+        addImplements(graph, 'C2', 'I2');
+
+        const baseFoo = addMethod(graph, 'Base2', 'foo');
+        const iFoo = addMethod(graph, 'I2', 'foo', 'Interface');
+        const cFoo = addMethod(graph, 'C2', 'foo');
+
+        const result = computeMRO(graph);
+
+        const edges: any[] = [];
+        graph.forEachRelationship((rel) => {
+          if (rel.type === 'METHOD_IMPLEMENTS') edges.push(rel);
+        });
+
+        // Should use C2.foo, not Base2.foo
+        expect(edges).toHaveLength(1);
+        expect(edges[0].sourceId).toBe(cFoo);
+        expect(edges[0].targetId).toBe(iFoo);
+      });
+
+      it('deep inheritance chain: GrandBase.foo satisfies I.foo', () => {
+        const graph = createKnowledgeGraph();
+        addClass(graph, 'GrandBase', 'java');
+        addClass(graph, 'Base3', 'java');
+        addClass(graph, 'I3', 'java', 'Interface');
+        addClass(graph, 'C3', 'java');
+
+        addExtends(graph, 'Base3', 'GrandBase');
+        addExtends(graph, 'C3', 'Base3');
+        addImplements(graph, 'C3', 'I3');
+
+        const grandFoo = addMethod(graph, 'GrandBase', 'foo');
+        // Base3 has NO foo
+        const iFoo = addMethod(graph, 'I3', 'foo', 'Interface');
+
+        const result = computeMRO(graph);
+
+        const edges: any[] = [];
+        graph.forEachRelationship((rel) => {
+          if (rel.type === 'METHOD_IMPLEMENTS') edges.push(rel);
+        });
+
+        expect(edges).toHaveLength(1);
+        expect(edges[0].sourceId).toBe(grandFoo);
+        expect(edges[0].targetId).toBe(iFoo);
+        expect(result.methodImplementsEdges).toBe(1);
+      });
+
+      it('arity mismatch prevents false match', () => {
+        const graph = createKnowledgeGraph();
+        addClass(graph, 'IArity', 'java', 'Interface');
+        addClass(graph, 'CArity', 'java');
+        addImplements(graph, 'CArity', 'IArity');
+
+        // Interface method: parameterCount=2, no parameterTypes
+        const iMethodId = generateId('Method', 'IArity.process');
+        graph.addNode({
+          id: iMethodId,
+          label: 'Method',
+          properties: { name: 'process', filePath: 'src/IArity.ts', parameterCount: 2 },
+        });
+        graph.addRelationship({
+          id: generateId('HAS_METHOD', `${generateId('Interface', 'IArity')}->${iMethodId}`),
+          sourceId: generateId('Interface', 'IArity'),
+          targetId: iMethodId,
+          type: 'HAS_METHOD',
+          confidence: 1.0,
+          reason: '',
+        });
+
+        // Class method: parameterCount=3, no parameterTypes
+        const cMethodId = generateId('Method', 'CArity.process');
+        graph.addNode({
+          id: cMethodId,
+          label: 'Method',
+          properties: { name: 'process', filePath: 'src/CArity.ts', parameterCount: 3 },
+        });
+        graph.addRelationship({
+          id: generateId('HAS_METHOD', `${generateId('Class', 'CArity')}->${cMethodId}`),
+          sourceId: generateId('Class', 'CArity'),
+          targetId: cMethodId,
+          type: 'HAS_METHOD',
+          confidence: 1.0,
+          reason: '',
+        });
+
+        const result = computeMRO(graph);
+        expect(result.methodImplementsEdges).toBe(0);
+      });
+
+      it('arity match when types missing', () => {
+        const graph = createKnowledgeGraph();
+        addClass(graph, 'IArityOk', 'java', 'Interface');
+        addClass(graph, 'CArityOk', 'java');
+        addImplements(graph, 'CArityOk', 'IArityOk');
+
+        // Interface method: parameterCount=2, no parameterTypes
+        const iMethodId = generateId('Method', 'IArityOk.process');
+        graph.addNode({
+          id: iMethodId,
+          label: 'Method',
+          properties: { name: 'process', filePath: 'src/IArityOk.ts', parameterCount: 2 },
+        });
+        graph.addRelationship({
+          id: generateId('HAS_METHOD', `${generateId('Interface', 'IArityOk')}->${iMethodId}`),
+          sourceId: generateId('Interface', 'IArityOk'),
+          targetId: iMethodId,
+          type: 'HAS_METHOD',
+          confidence: 1.0,
+          reason: '',
+        });
+
+        // Class method: parameterCount=2, no parameterTypes
+        const cMethodId = generateId('Method', 'CArityOk.process');
+        graph.addNode({
+          id: cMethodId,
+          label: 'Method',
+          properties: { name: 'process', filePath: 'src/CArityOk.ts', parameterCount: 2 },
+        });
+        graph.addRelationship({
+          id: generateId('HAS_METHOD', `${generateId('Class', 'CArityOk')}->${cMethodId}`),
+          sourceId: generateId('Class', 'CArityOk'),
+          targetId: cMethodId,
+          type: 'HAS_METHOD',
+          confidence: 1.0,
+          reason: '',
+        });
+
+        const result = computeMRO(graph);
+        expect(result.methodImplementsEdges).toBe(1);
+      });
+
+      it('multiple same-arity candidates = ambiguous, no edge emitted', () => {
+        const graph = createKnowledgeGraph();
+        addClass(graph, 'IAmbig', 'java', 'Interface');
+        addClass(graph, 'CAmbig', 'java');
+        addImplements(graph, 'CAmbig', 'IAmbig');
+
+        // Interface method: parameterCount=1, no parameterTypes
+        const iMethodId = generateId('Method', 'IAmbig.handle');
+        graph.addNode({
+          id: iMethodId,
+          label: 'Method',
+          properties: { name: 'handle', filePath: 'src/IAmbig.ts', parameterCount: 1 },
+        });
+        graph.addRelationship({
+          id: generateId('HAS_METHOD', `${generateId('Interface', 'IAmbig')}->${iMethodId}`),
+          sourceId: generateId('Interface', 'IAmbig'),
+          targetId: iMethodId,
+          type: 'HAS_METHOD',
+          confidence: 1.0,
+          reason: '',
+        });
+
+        // Two class methods named handle, both with parameterCount=1
+        const cMethod1 = generateId('Method', 'CAmbig.handle.1');
+        graph.addNode({
+          id: cMethod1,
+          label: 'Method',
+          properties: { name: 'handle', filePath: 'src/CAmbig.ts', parameterCount: 1 },
+        });
+        graph.addRelationship({
+          id: generateId('HAS_METHOD', `${generateId('Class', 'CAmbig')}->${cMethod1}`),
+          sourceId: generateId('Class', 'CAmbig'),
+          targetId: cMethod1,
+          type: 'HAS_METHOD',
+          confidence: 1.0,
+          reason: '',
+        });
+
+        const cMethod2 = generateId('Method', 'CAmbig.handle.2');
+        graph.addNode({
+          id: cMethod2,
+          label: 'Method',
+          properties: { name: 'handle', filePath: 'src/CAmbig.ts', parameterCount: 1 },
+        });
+        graph.addRelationship({
+          id: generateId('HAS_METHOD', `${generateId('Class', 'CAmbig')}->${cMethod2}`),
+          sourceId: generateId('Class', 'CAmbig'),
+          targetId: cMethod2,
+          type: 'HAS_METHOD',
+          confidence: 1.0,
+          reason: '',
+        });
+
+        const result = computeMRO(graph);
+        expect(result.methodImplementsEdges).toBe(0);
+      });
+    });
   });
 });

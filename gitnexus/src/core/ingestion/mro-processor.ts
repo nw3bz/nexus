@@ -441,10 +441,23 @@ export function computeMRO(graph: KnowledgeGraph): MROResult {
 
 /**
  * Check if two parameter type arrays match.
- * Lenient: if either side has no type info, match by name only.
+ * When either side has no type info, fall back to parameterCount comparison
+ * (arity-compatible matching). If both have parameterCount and they differ,
+ * return false. If counts match or either is undefined, return true (lenient).
  */
-function parameterTypesMatch(a: string[], b: string[]): boolean {
-  if (a.length === 0 || b.length === 0) return true;
+function parameterTypesMatch(
+  a: string[],
+  b: string[],
+  aParamCount?: number,
+  bParamCount?: number,
+): boolean {
+  if (a.length === 0 || b.length === 0) {
+    // Fall back to arity check when type info is missing
+    if (aParamCount !== undefined && bParamCount !== undefined) {
+      return aParamCount === bParamCount;
+    }
+    return true; // lenient when either count is unknown
+  }
   if (a.length !== b.length) return false;
   return a.every((t, i) => t === b[i]);
 }
@@ -468,24 +481,24 @@ function emitMethodImplementsEdges(
 
     // Get this class's own methods
     const ownMethodIds = methodMap.get(classId) ?? [];
-    if (ownMethodIds.length === 0) continue;
 
-    // Build a lookup: methodName → Array<{methodId, parameterTypes}> for own methods
+    // Build a lookup: methodName → Array<{methodId, parameterTypes, parameterCount}> for own methods
     const ownMethodsByName = new Map<
       string,
-      Array<{ methodId: string; parameterTypes: string[] }>
+      Array<{ methodId: string; parameterTypes: string[]; parameterCount?: number }>
     >();
     for (const methodId of ownMethodIds) {
       const methodNode = graph.getNode(methodId);
       if (!methodNode || methodNode.label === 'Property') continue;
       const name = methodNode.properties.name as string;
       const parameterTypes = (methodNode.properties.parameterTypes as string[] | undefined) ?? [];
+      const parameterCount = methodNode.properties.parameterCount as number | undefined;
       let bucket = ownMethodsByName.get(name);
       if (!bucket) {
         bucket = [];
         ownMethodsByName.set(name, bucket);
       }
-      bucket.push({ methodId, parameterTypes });
+      bucket.push({ methodId, parameterTypes, parameterCount });
     }
 
     // Collect ALL transitive ancestors and classify each as EXTENDS or IMPLEMENTS
@@ -514,34 +527,146 @@ function emitMethodImplementsEdges(
         const ancestorName = ancestorMethodNode.properties.name as string;
         const ancestorParamTypes =
           (ancestorMethodNode.properties.parameterTypes as string[] | undefined) ?? [];
+        const ancestorParamCount = ancestorMethodNode.properties.parameterCount as
+          | number
+          | undefined;
 
-        // Find matching method in own class by name + parameterTypes
+        // Find matching method in own class by name + parameterTypes/arity
         const candidates = ownMethodsByName.get(ancestorName);
-        if (!candidates) continue;
 
-        for (const candidate of candidates) {
-          if (parameterTypesMatch(candidate.parameterTypes, ancestorParamTypes)) {
-            const edgeKey = `${candidate.methodId}->${ancestorMethodId}`;
-            if (emitted.has(edgeKey)) break;
-            emitted.add(edgeKey);
-
-            graph.addRelationship({
-              id: generateId('METHOD_IMPLEMENTS', edgeKey),
-              sourceId: candidate.methodId,
-              targetId: ancestorMethodId,
-              type: 'METHOD_IMPLEMENTS',
-              confidence: 1.0,
-              reason: '',
-            });
-            edgeCount++;
-            break; // first match wins for this ancestor method
+        // Unit 3: If no own method matches, walk the EXTENDS chain to find inherited concrete method
+        if (!candidates || candidates.length === 0) {
+          const inherited = findInheritedMethod(
+            classId,
+            ancestorName,
+            ancestorParamTypes,
+            ancestorParamCount,
+            graph,
+            parentMap,
+            methodMap,
+            parentEdgeType,
+          );
+          if (inherited) {
+            const edgeKey = `${inherited.methodId}->${ancestorMethodId}`;
+            if (!emitted.has(edgeKey)) {
+              emitted.add(edgeKey);
+              graph.addRelationship({
+                id: generateId('METHOD_IMPLEMENTS', edgeKey),
+                sourceId: inherited.methodId,
+                targetId: ancestorMethodId,
+                type: 'METHOD_IMPLEMENTS',
+                confidence: 1.0,
+                reason: '',
+              });
+              edgeCount++;
+            }
           }
+          continue;
         }
+
+        // Unit 4: Filter candidates by type/arity match, then check for ambiguity
+        const matching = candidates.filter((c) =>
+          parameterTypesMatch(
+            c.parameterTypes,
+            ancestorParamTypes,
+            c.parameterCount,
+            ancestorParamCount,
+          ),
+        );
+
+        if (matching.length === 0) continue;
+
+        // If multiple candidates match at name+arity level, emit no edge (ambiguous)
+        if (matching.length > 1) continue;
+
+        const winner = matching[0];
+        const edgeKey = `${winner.methodId}->${ancestorMethodId}`;
+        if (emitted.has(edgeKey)) continue;
+        emitted.add(edgeKey);
+
+        graph.addRelationship({
+          id: generateId('METHOD_IMPLEMENTS', edgeKey),
+          sourceId: winner.methodId,
+          targetId: ancestorMethodId,
+          type: 'METHOD_IMPLEMENTS',
+          confidence: 1.0,
+          reason: '',
+        });
+        edgeCount++;
       }
     }
   }
 
   return edgeCount;
+}
+
+/**
+ * Walk the class's EXTENDS chain (not IMPLEMENTS) to find the nearest
+ * concrete method matching the given name and parameter signature.
+ * Returns the first matching method found in BFS order, or null.
+ */
+function findInheritedMethod(
+  classId: string,
+  methodName: string,
+  targetParamTypes: string[],
+  targetParamCount: number | undefined,
+  graph: KnowledgeGraph,
+  parentMap: Map<string, string[]>,
+  methodMap: Map<string, string[]>,
+  parentEdgeType: Map<string, Map<string, 'EXTENDS' | 'IMPLEMENTS'>>,
+): { methodId: string; parameterTypes: string[] } | null {
+  const visited = new Set<string>();
+  const queue: string[] = [];
+
+  // Seed with direct EXTENDS parents only
+  const directParents = parentMap.get(classId) ?? [];
+  const directEdges = parentEdgeType.get(classId);
+  for (const pid of directParents) {
+    const et = directEdges?.get(pid);
+    if (et === 'EXTENDS') {
+      // Also check that the parent is not an Interface/Trait
+      const parentNode = graph.getNode(pid);
+      if (parentNode && parentNode.label !== 'Interface' && parentNode.label !== 'Trait') {
+        queue.push(pid);
+      }
+    }
+  }
+
+  while (queue.length > 0) {
+    const ancestorId = queue.shift()!;
+    if (visited.has(ancestorId)) continue;
+    visited.add(ancestorId);
+
+    // Check this ancestor's methods
+    const methods = methodMap.get(ancestorId) ?? [];
+    for (const mid of methods) {
+      const mNode = graph.getNode(mid);
+      if (!mNode || mNode.label === 'Property') continue;
+      if (mNode.properties.name !== methodName) continue;
+
+      const mParamTypes = (mNode.properties.parameterTypes as string[] | undefined) ?? [];
+      const mParamCount = mNode.properties.parameterCount as number | undefined;
+      if (parameterTypesMatch(mParamTypes, targetParamTypes, mParamCount, targetParamCount)) {
+        return { methodId: mid, parameterTypes: mParamTypes };
+      }
+    }
+
+    // Continue walking EXTENDS parents of this ancestor
+    const grandparents = parentMap.get(ancestorId) ?? [];
+    const ancestorEdges = parentEdgeType.get(ancestorId);
+    for (const gp of grandparents) {
+      if (visited.has(gp)) continue;
+      const gpEdge = ancestorEdges?.get(gp);
+      if (gpEdge === 'EXTENDS') {
+        const gpNode = graph.getNode(gp);
+        if (gpNode && gpNode.label !== 'Interface' && gpNode.label !== 'Trait') {
+          queue.push(gp);
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 /**

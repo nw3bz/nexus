@@ -97,6 +97,7 @@ export const VALID_RELATION_TYPES = new Set([
   'HAS_METHOD',
   'HAS_PROPERTY',
   'METHOD_OVERRIDES',
+  'OVERRIDES', // Legacy alias — dual-read for pre-rename indexes
   'METHOD_IMPLEMENTS',
   'ACCESSES',
   'HANDLES_ROUTE',
@@ -177,7 +178,6 @@ export class LocalBackend {
   private repos: Map<string, RepoHandle> = new Map();
   private contextCache: Map<string, CodebaseContext> = new Map();
   private initializedRepos: Set<string> = new Set();
-  private migratedRepos: Set<string> = new Set();
   private reinitPromises: Map<string, Promise<void>> = new Map();
   private lastStalenessCheck: Map<string, number> = new Map();
   private groupToolSvc: GroupService | null = null;
@@ -410,20 +410,6 @@ export class LocalBackend {
     try {
       await initLbug(repoId, handle.lbugPath);
       this.initializedRepos.add(repoId);
-      // Migrate legacy OVERRIDES → METHOD_OVERRIDES (once per session per repo)
-      // TODO: remove this migration after a few releases once most users have migrated indexes
-      if (!this.migratedRepos.has(repoId)) {
-        this.migratedRepos.add(repoId);
-        try {
-          await executeParameterized(
-            repoId,
-            `MATCH ()-[r:CodeRelation {type: 'OVERRIDES'}]->() SET r.type = 'METHOD_OVERRIDES'`,
-            {},
-          );
-        } catch {
-          /* Old index may not have OVERRIDES edges — ignore */
-        }
-      }
     } catch (err: any) {
       // If lock error, mark as not initialized so next call retries
       this.initializedRepos.delete(repoId);
@@ -1218,7 +1204,7 @@ export class LocalBackend {
       repo.id,
       `
       MATCH (caller)-[r:CodeRelation]->(n {id: $symId})
-      WHERE r.type IN ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS', 'HAS_METHOD', 'HAS_PROPERTY', 'METHOD_OVERRIDES', 'METHOD_IMPLEMENTS', 'ACCESSES']
+      WHERE r.type IN ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS', 'HAS_METHOD', 'HAS_PROPERTY', 'METHOD_OVERRIDES', 'OVERRIDES', 'METHOD_IMPLEMENTS', 'ACCESSES']
       RETURN r.type AS relType, caller.id AS uid, caller.name AS name, caller.filePath AS filePath, labels(caller)[0] AS kind
       LIMIT 30
     `,
@@ -1308,7 +1294,7 @@ export class LocalBackend {
       repo.id,
       `
       MATCH (n {id: $symId})-[r:CodeRelation]->(target)
-      WHERE r.type IN ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS', 'HAS_METHOD', 'HAS_PROPERTY', 'METHOD_OVERRIDES', 'METHOD_IMPLEMENTS', 'ACCESSES']
+      WHERE r.type IN ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS', 'HAS_METHOD', 'HAS_PROPERTY', 'METHOD_OVERRIDES', 'OVERRIDES', 'METHOD_IMPLEMENTS', 'ACCESSES']
       RETURN r.type AS relType, target.id AS uid, target.name AS name, target.filePath AS filePath, labels(target)[0] AS kind
       LIMIT 30
     `,
@@ -1934,9 +1920,11 @@ export class LocalBackend {
     const rawRelTypes =
       mappedRelTypes && mappedRelTypes.length > 0
         ? mappedRelTypes.filter((t: string) => VALID_RELATION_TYPES.has(t))
-        : ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS'];
+        : ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS', 'METHOD_OVERRIDES', 'METHOD_IMPLEMENTS'];
     const relationTypes =
-      rawRelTypes.length > 0 ? rawRelTypes : ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS'];
+      rawRelTypes.length > 0
+        ? rawRelTypes
+        : ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS', 'METHOD_OVERRIDES', 'METHOD_IMPLEMENTS'];
     const includeTests = params.includeTests ?? false;
     const minConfidence = params.minConfidence ?? 0;
 
@@ -2486,9 +2474,11 @@ export class LocalBackend {
     const rawRelTypes =
       mappedRelTypes && mappedRelTypes.length > 0
         ? mappedRelTypes.filter((t: string) => VALID_RELATION_TYPES.has(t))
-        : ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS'];
+        : ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS', 'METHOD_OVERRIDES', 'METHOD_IMPLEMENTS'];
     const relationTypes =
-      rawRelTypes.length > 0 ? rawRelTypes : ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS'];
+      rawRelTypes.length > 0
+        ? rawRelTypes
+        : ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS', 'METHOD_OVERRIDES', 'METHOD_IMPLEMENTS'];
 
     try {
       return await this._runImpactBFS(repo, sym, symType, dir, {
