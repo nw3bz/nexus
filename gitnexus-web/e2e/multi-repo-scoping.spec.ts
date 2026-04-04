@@ -99,12 +99,13 @@ test.describe('Multi-Repo Scoping', () => {
     const expectedNodes = repoInfo.stats?.nodes;
 
     if (expectedNodes) {
-      // Status bar should show the correct node count
-      const nodeText = page.getByText(/\d+ nodes/);
+      // Status bar shows node count — use the status-ready area to avoid
+      // matching multiple elements (file tree, header may also show counts)
+      const statusBar = page.locator('footer');
+      const nodeText = statusBar.getByText(/\d+ nodes/).first();
       await expect(nodeText).toBeVisible({ timeout: 10_000 });
       const text = await nodeText.textContent();
       const displayedNodes = parseInt(text?.match(/(\d+)\s*nodes/)?.[1] ?? '0', 10);
-      // Allow some variance (graph may filter some nodes)
       expect(displayedNodes).toBeGreaterThan(0);
     }
   });
