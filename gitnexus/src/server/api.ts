@@ -4,7 +4,7 @@
  * REST API for browser-based clients to query the local .gitnexus/ index.
  * Also hosts the MCP server over StreamableHTTP for remote AI tool access.
  *
- * Security: binds to 127.0.0.1 by default (use --host to override).
+ * Security: binds to localhost by default (use --host to override).
  * CORS is restricted to localhost, private/LAN networks, and the deployed site.
  */
 
@@ -282,7 +282,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   app.use(
     cors({
       origin: (origin, callback) => {
-        callback(null, isAllowedOrigin(origin) ? true : false);
+        callback(null, isAllowedOrigin(origin));
       },
     }),
   );
