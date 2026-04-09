@@ -42,7 +42,7 @@ import type {
   ExtractedDecoratorRoute,
   ExtractedToolDef,
   FileConstructorBindings,
-  FileAllScopeBindings,
+  FileScopeBindings,
   ExtractedORMQuery,
 } from './workers/parse-worker.js';
 import { getTreeSitterBufferSize, TREE_SITTER_MAX_BUFFER } from './constants.js';
@@ -60,7 +60,7 @@ export interface WorkerExtractedData {
   toolDefs: ExtractedToolDef[];
   ormQueries: ExtractedORMQuery[];
   constructorBindings: FileConstructorBindings[];
-  allScopeBindings: FileAllScopeBindings[];
+  fileScopeBindings: FileScopeBindings[];
 }
 
 // ============================================================================
@@ -94,7 +94,7 @@ const processParsingWithWorkers = async (
       toolDefs: [],
       ormQueries: [],
       constructorBindings: [],
-      allScopeBindings: [],
+      fileScopeBindings: [],
     };
 
   const total = files.length;
@@ -118,7 +118,7 @@ const processParsingWithWorkers = async (
   const allToolDefs: ExtractedToolDef[] = [];
   const allORMQueries: ExtractedORMQuery[] = [];
   const allConstructorBindings: FileConstructorBindings[] = [];
-  const allScopeBindingsByFile: FileAllScopeBindings[] = [];
+  const fileScopeBindingsByFile: FileScopeBindings[] = [];
   for (const result of chunkResults) {
     for (const node of result.nodes) {
       graph.addNode({
@@ -154,8 +154,8 @@ const processParsingWithWorkers = async (
     for (const _item of result.toolDefs) allToolDefs.push(_item);
     if (result.ormQueries) for (const _item of result.ormQueries) allORMQueries.push(_item);
     for (const _item of result.constructorBindings) allConstructorBindings.push(_item);
-    if (result.allScopeBindings)
-      for (const _item of result.allScopeBindings) allScopeBindingsByFile.push(_item);
+    if (result.fileScopeBindings)
+      for (const _item of result.fileScopeBindings) fileScopeBindingsByFile.push(_item);
   }
 
   // Merge and log skipped languages from workers
@@ -185,7 +185,7 @@ const processParsingWithWorkers = async (
     toolDefs: allToolDefs,
     ormQueries: allORMQueries,
     constructorBindings: allConstructorBindings,
-    allScopeBindings: allScopeBindingsByFile,
+    fileScopeBindings: fileScopeBindingsByFile,
   };
 };
 
@@ -361,8 +361,8 @@ const processParsingSequential = async (
     // The accumulator feed happens later in `call-processor.ts` via its own
     // `typeEnv.flush(accumulator)` call. Flushing here would double-count
     // file-scope bindings and break the single-use invariant of `flush()`.
-    // See PR #743 (SM-14) and plan `docs/plans/2026-04-09-005-*.md` for the
-    // full accumulator lifecycle and flush-site ownership rules.
+    // See the BindingAccumulator class JSDoc for the full accumulator
+    // lifecycle and flush-site ownership rules.
     const typeEnv = provider.fieldExtractor
       ? buildTypeEnv(tree, language, {
           enclosingFunctionFinder: provider.enclosingFunctionFinder,

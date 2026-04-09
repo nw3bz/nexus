@@ -5878,14 +5878,13 @@ function process() {
       expect(userEntry!.scope).toBe('');
     });
 
-    // PR #743 Codex adversarial review follow-up (plan 2026-04-09-005):
-    // flush() was narrowed to file-scope-only to match the worker-path
-    // narrowing in commit 803631fe. Function-scope entries are dropped at
+    // flush() is narrowed to file-scope-only, matching the worker-path
+    // narrowing. Function-scope entries are dropped at
     // the flush seam and never reach the accumulator until a Phase 9
     // consumer lands. This test was previously the positive assertion that
     // function-scope entries DID land in the accumulator; it is now a
     // negative assertion guarding the narrowing.
-    it('does NOT flush function-scoped bindings into accumulator (narrowed per PR #743 Codex review)', () => {
+    it('does NOT flush function-scoped bindings into accumulator (file-scope narrowing)', () => {
       const code = `function process() {\n  const result: Response = fetch();\n}`;
       const tree = parse(code, TypeScript.typescript);
       const typeEnv = buildTypeEnv(tree, 'typescript');
@@ -5905,7 +5904,7 @@ function process() {
     it('narrows mixed file-scope and function-scope env to file-scope only', () => {
       // Core narrowing assertion: a realistic file with BOTH file-scope and
       // function-scope bindings flushes only the file-scope subset. This is
-      // the R1 red/green signal for plan 2026-04-09-005.
+      // the primary narrowing-contract assertion for the sequential path.
       const code = `const dbClient: Database = connectDb();\nfunction handleRequest() {\n  const localRequest: Request = parseRequest();\n  const localUser: User = loadUser();\n}`;
       const tree = parse(code, TypeScript.typescript);
       const typeEnv = buildTypeEnv(tree, 'typescript');
@@ -5962,6 +5961,114 @@ function process() {
 
       typeEnv.flush('/src/a.ts', acc);
       expect(() => typeEnv.flush('/src/a.ts', acc)).toThrow(/single-use/);
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // End-to-end integration: drive real TypeEnv → real flush → real
+  // BindingAccumulator → real enrichExportedTypeMap with a realistic
+  // graph-node shape. Every other accumulator test is unit-level with
+  // mocks; this exercises the full wiring between layers that the
+  // accumulator's bug history has all been in. If the wiring breaks
+  // (e.g. a future refactor changes TypeEnv's flush output, or the
+  // enrichment helper's node-ID format drifts), this test fires.
+  // ---------------------------------------------------------------------
+  describe('end-to-end: real TypeEnv → flush → accumulator → enrichment', () => {
+    it('enriches exportedTypeMap with bindings from a real TypeScript file', async () => {
+      // Lazy import to keep the test co-located without hoisting binding
+      // accumulator imports to the top of the type-env test file.
+      const { enrichExportedTypeMap, type: _ignore } =
+        (await import('../../src/core/ingestion/binding-accumulator.js')) as typeof import('../../src/core/ingestion/binding-accumulator.js') & {
+          type: unknown;
+        };
+
+      const code = `
+export const dbClient: Database = connectDb();
+export const API_URL: string = 'https://api.example.com';
+function internal() {
+  const localVar: LocalType = makeLocal();
+}
+`;
+      const tree = parse(code, TypeScript.typescript);
+      const typeEnv = buildTypeEnv(tree, 'typescript');
+      const acc = new BindingAccumulator();
+
+      // Real flush — exercises the narrowed FILE_SCOPE-only iteration.
+      typeEnv.flush('src/service.ts', acc);
+      acc.finalize();
+
+      // Verify the flush wrote only file-scope entries (no `localVar`).
+      const entries = acc.getFile('src/service.ts');
+      expect(entries).toBeDefined();
+      const varNames = (entries ?? []).map((e) => e.varName).sort();
+      expect(varNames).toEqual(['API_URL', 'dbClient']);
+      for (const entry of entries ?? []) {
+        expect(entry.scope).toBe('');
+      }
+
+      // Build a minimal realistic graph matching the production node-ID
+      // candidate order (Function → Variable → Const). The dbClient is
+      // exported as a Variable, API_URL is exported as a Const.
+      const graph = {
+        getNode: (id: string) => {
+          if (id === 'Variable:src/service.ts:dbClient') {
+            return { id, properties: { isExported: true } };
+          }
+          if (id === 'Const:src/service.ts:API_URL') {
+            return { id, properties: { isExported: true } };
+          }
+          return undefined;
+        },
+      };
+      const exportedTypeMap = new Map<string, Map<string, string>>();
+
+      // Real enrichment — not a reimplementation.
+      const enrichedCount = enrichExportedTypeMap(acc, graph, exportedTypeMap);
+
+      expect(enrichedCount).toBe(2);
+      expect(exportedTypeMap.get('src/service.ts')?.get('dbClient')).toBe('Database');
+      expect(exportedTypeMap.get('src/service.ts')?.get('API_URL')).toBe('string');
+      // The function-scope `localVar` is absent because flush() narrowed
+      // it out before it could reach the accumulator.
+      expect(exportedTypeMap.get('src/service.ts')?.has('localVar')).toBe(false);
+
+      // Lifecycle: dispose releases heap.
+      acc.dispose();
+      expect(acc.disposed).toBe(true);
+      expect(acc.fileCount).toBe(0);
+    });
+
+    it('respects Tier 0 priority when the SymbolTable pre-populated the export', async () => {
+      const { enrichExportedTypeMap } =
+        await import('../../src/core/ingestion/binding-accumulator.js');
+
+      const code = `export const helper: WorkerInferredType = makeHelper();`;
+      const tree = parse(code, TypeScript.typescript);
+      const typeEnv = buildTypeEnv(tree, 'typescript');
+      const acc = new BindingAccumulator();
+      typeEnv.flush('src/utils.ts', acc);
+      acc.finalize();
+
+      // Simulate SymbolTable pre-populating the exportedTypeMap with an
+      // authoritative Tier 0 type. The real enrichment loop must NOT
+      // overwrite it with the WorkerInferredType from the accumulator.
+      const exportedTypeMap = new Map<string, Map<string, string>>([
+        ['src/utils.ts', new Map([['helper', 'SymbolTableAuthoritativeType']])],
+      ]);
+
+      const graph = {
+        getNode: (id: string) =>
+          id === 'Const:src/utils.ts:helper' || id === 'Variable:src/utils.ts:helper'
+            ? { id, properties: { isExported: true } }
+            : undefined,
+      };
+
+      const enriched = enrichExportedTypeMap(acc, graph, exportedTypeMap);
+
+      expect(enriched).toBe(0);
+      expect(exportedTypeMap.get('src/utils.ts')?.get('helper')).toBe(
+        'SymbolTableAuthoritativeType',
+      );
     });
   });
 });

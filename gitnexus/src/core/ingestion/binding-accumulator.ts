@@ -1,39 +1,44 @@
 /**
  * BindingAccumulator — read-append-only accumulator that collects TypeEnv
- * bindings across all files in the GitNexus analyzer pipeline.
+ * bindings across files in the GitNexus analyzer pipeline.
  *
- * **Quality asymmetry between execution paths (PR #743 review):** Entries in
- * this accumulator are NOT homogeneous in resolution quality. The pipeline
- * feeds bindings through two paths:
+ * **Current behavior (both execution paths):** The accumulator carries only
+ * file-scope (`scope = ''`) entries. Function-scope bindings are stripped
+ * at both write sites:
  *
- * - **Sequential path** (`call-processor.ts` → `typeEnv.flush()`): files
- *   processed on the main thread have access to the full `SymbolTable` and
- *   `importedBindings` at build time, so their bindings benefit from Tier 2
- *   cross-file propagation (e.g. an imported constructor's return type
- *   flows into the variable binding).
+ * - **Worker path**: `parse-worker.ts` serializes only
+ *   `typeEnv.fileScope()` entries across the IPC boundary.
+ * - **Sequential path**: `type-env.ts::flush()` iterates only the FILE_SCOPE
+ *   entry of the env map and writes `BindingEntry` records with
+ *   `scope: ''` hardcoded.
  *
- * - **Worker path** (`parse-worker.ts` → IPC tuple → pipeline adapter): files
- *   processed in worker threads run without the main-thread `SymbolTable`
- *   and without `importedBindings`, so they can only produce Tier 0
- *   (annotation-declared) and local Tier 1 (same-file constructor
- *   inference) bindings. Cross-file type flow is not visible to the worker.
+ * The narrowing exists because function-scope bindings have zero downstream
+ * consumers today and were previously costing ~4.9 MB of heap + IPC on
+ * every pipeline run. See `type-env.ts::flush()` and the `FileScopeBindings`
+ * JSDoc in `parse-worker.ts` for the paired Phase 9 reversion checklist.
  *
- * Implication: Phase 9 consumers that trust every accumulator entry equally
- * will silently produce worse results for large repos (worker path dominates)
- * than for small ones (sequential path dominates). The asymmetry is
- * structural — workers cannot see the SymbolTable without either shipping a
- * copy over IPC or synchronizing after parse. If Phase 9 needs homogeneous
- * quality, it should either (a) tag entries with their tier at insert time
- * so consumers can filter, or (b) post-process worker-path entries through a
- * follow-up resolution pass once the main-thread SymbolTable is complete.
+ * **Historical quality asymmetry (Phase 9 consideration):** Even though
+ * both paths now carry only file-scope data, the two paths were built
+ * under different resolution capabilities, and a future Phase 9 reverter
+ * that widens them back to all scopes will inherit that asymmetry:
  *
- * **PR #743 review — IPC narrowing:** The worker path currently only
- * serializes file-scope (`scope = ''`) entries through the IPC boundary.
- * Function-scope bindings are stripped at `parse-worker.ts` to avoid paying
- * a ~4.9 MB live memory cost for data that has no current consumer. The
- * sequential path's `flush()` still writes all scopes (file-scope and
- * function-scope). See `FileAllScopeBindings` JSDoc in `parse-worker.ts`
- * for the Phase 9 reversion path.
+ * - **Sequential path** had (and would regain) access to the full
+ *   `SymbolTable` and `importedBindings`, so its bindings benefit from
+ *   Tier 2 cross-file propagation.
+ * - **Worker path** runs without `SymbolTable` / `importedBindings` and
+ *   can only produce Tier 0 (annotation-declared) and local Tier 1
+ *   (same-file constructor inference) bindings.
+ *
+ * Phase 9 consumers that trust every entry equally will silently produce
+ * worse results for large repos (worker-dominant) than small ones
+ * (sequential-dominant). If Phase 9 needs homogeneous quality, either
+ * (a) tag entries with their tier at insert time so consumers can filter,
+ * or (b) post-process worker-path entries through a follow-up resolution
+ * pass after the main-thread `SymbolTable` is complete.
+ *
+ * **Lifecycle contract**: `append → finalize → consume → dispose`. See
+ * `finalize()` and `dispose()` for the state machine. Disposal is
+ * orthogonal to finalization: either order is legal.
  */
 
 export interface BindingEntry {
@@ -42,12 +47,100 @@ export interface BindingEntry {
   readonly typeName: string;
 }
 
+/**
+ * Minimal graph-node shape required by `enrichExportedTypeMap()`. Intentionally
+ * narrower than the full `GraphNode` type in `graph/types.ts` so tests can
+ * construct a minimal mock without depending on the full graph module, and
+ * so the enrichment logic is a pure function over this contract.
+ *
+ * Matches the shape of the real `KnowledgeGraph` node's `properties.isExported`
+ * access path — tests that use a different shape silently pass while
+ * production fails.
+ */
+export interface EnrichmentGraphNode {
+  readonly id: string;
+  readonly properties?: { readonly isExported?: boolean } | undefined;
+}
+
+/**
+ * Minimal graph lookup interface used by `enrichExportedTypeMap()`.
+ * Consumes only the method the enrichment loop actually calls.
+ */
+export interface EnrichmentGraphLookup {
+  getNode(id: string): EnrichmentGraphNode | undefined;
+}
+
+/**
+ * Merge file-scope bindings from a (finalized) `BindingAccumulator` into an
+ * `exportedTypeMap` for symbols whose graph nodes are marked as exported.
+ *
+ * This is the single source of truth for the worker-path ExportedTypeMap
+ * enrichment loop. Previously the logic lived inline in `pipeline.ts` and
+ * the test suite reimplemented it as a `runEnrichmentLoop` helper — a
+ * drift-prone pattern that meant tests could pass while production regressed.
+ * Extracting it here makes the production code call the same function the
+ * tests call.
+ *
+ * **Node ID candidate order**: `Function:{filePath}:{name}` →
+ * `Variable:{filePath}:{name}` → `Const:{filePath}:{name}`. First match wins.
+ *
+ * **Tier 0 priority**: if `exportedTypeMap` already has an entry for a
+ * `(filePath, name)` pair, the accumulator entry does NOT overwrite it —
+ * the SymbolTable tier-0 pass is authoritative. Without this guard, a
+ * worker-path binding could clobber a higher-quality type from SymbolTable.
+ *
+ * **Finalize precondition**: the accumulator should be finalized before
+ * calling this function. The lifecycle contract is
+ * `append → finalize → enrich → dispose`. Finalization is not asserted
+ * here (the test suite and pipeline both honor it separately), but any
+ * append happening concurrently with this enrichment would be a lifecycle
+ * bug at the caller level.
+ *
+ * @returns The number of new entries written into `exportedTypeMap`
+ *          (0 on empty accumulator or when every candidate was filtered
+ *          out by the export check or the Tier 0 guard).
+ */
+export function enrichExportedTypeMap(
+  bindingAccumulator: BindingAccumulator,
+  graph: EnrichmentGraphLookup,
+  exportedTypeMap: Map<string, Map<string, string>>,
+): number {
+  if (bindingAccumulator.fileCount === 0) return 0;
+  let enriched = 0;
+  for (const filePath of bindingAccumulator.files()) {
+    for (const [name, type] of bindingAccumulator.fileScopeEntries(filePath)) {
+      // Three-candidate-ID lookup mirrors the sequential-path export check
+      // in `collectExportedBindings()` (call-processor.ts).
+      const functionNodeId = `Function:${filePath}:${name}`;
+      const variableNodeId = `Variable:${filePath}:${name}`;
+      const constNodeId = `Const:${filePath}:${name}`;
+      const node =
+        graph.getNode(functionNodeId) ??
+        graph.getNode(variableNodeId) ??
+        graph.getNode(constNodeId);
+      if (!node?.properties?.isExported) continue;
+
+      let fileExports = exportedTypeMap.get(filePath);
+      if (!fileExports) {
+        fileExports = new Map();
+        exportedTypeMap.set(filePath, fileExports);
+      }
+      // Tier 0 priority: SymbolTable-populated entries are authoritative.
+      if (!fileExports.has(name)) {
+        fileExports.set(name, type);
+        enriched++;
+      }
+    }
+  }
+  return enriched;
+}
+
 const ENTRY_OVERHEAD = 64; // bytes per entry (object overhead + property refs)
 const MAP_ENTRY_OVERHEAD = 80; // bytes per file entry in the map
 
 export class BindingAccumulator {
-  // PR #743 review (Low finding #1): storage is split into two parallel
-  // maps so fileScopeEntries() is O(n_file_scope) instead of O(n_total).
+  // Storage is split into two parallel maps so fileScopeEntries() is
+  // O(n_file_scope) instead of O(n_total).
   // - _allByFile holds every BindingEntry (used by getFile, memory estimate).
   // - _fileScopeByFile caches the flat [varName, typeName] view of the
   //   `scope === ''` subset, populated at insert time so reads are O(1) map
@@ -65,14 +158,41 @@ export class BindingAccumulator {
   /**
    * Append bindings for a file. Safe to call multiple times for the same file.
    * Throws if the accumulator has been finalized. Skips if entries is empty.
+   *
+   * The `entries` parameter is `readonly` — this method never mutates the
+   * caller's array. Internally, the first `appendFile` call per filePath
+   * makes a defensive copy (`slice()`), and subsequent calls push into the
+   * accumulator's own storage.
    */
-  appendFile(filePath: string, entries: BindingEntry[]): void {
+  appendFile(filePath: string, entries: readonly BindingEntry[]): void {
     if (this._finalized) {
-      throw new Error('BindingAccumulator is finalized — no further appends allowed');
+      throw new Error(
+        '[BindingAccumulator] appendFile after finalize — no further appends allowed',
+      );
     }
     if (entries.length === 0) {
       return;
     }
+    // Contract consistency: if this accumulator was previously disposed
+    // without being finalized, `dispose()` is documented to leave it
+    // "behaving like a fresh one" for subsequent appends. Clear the
+    // `_disposed` flag here so the `disposed` getter tracks the actual
+    // live state, not a stale signal from the prior lifecycle cycle.
+    if (this._disposed) {
+      this._disposed = false;
+    }
+    // Note on the file-scope-only invariant:
+    // The accumulator does NOT reject function-scope entries at this
+    // boundary. The narrowing contract is enforced by the two production
+    // write sites — `parse-worker.ts` (which uses `typeEnv.fileScope()`
+    // and hardcodes `scope: ''` in the pipeline adapter) and
+    // `type-env.ts::flush()` (which iterates only `env.get(FILE_SCOPE)`).
+    // The class JSDoc documents the invariant and the Phase 9 reversion
+    // path. Making `appendFile` runtime-reject non-file-scope entries
+    // would break the accumulator's own storage-split tests which
+    // legitimately exercise mixed-scope entries. If a future write path
+    // violates the invariant, tests should fail via missing exports in
+    // the enrichment loop, not via an assertion here.
     // All-scope store.
     const existingAll = this._allByFile.get(filePath);
     if (existingAll !== undefined) {
@@ -98,6 +218,31 @@ export class BindingAccumulator {
 
   /** Lock the accumulator — no further appends. Idempotent. */
   finalize(): void {
+    // Dev-mode invariant: verify the parallel storage split is consistent.
+    // `_fileScopeByFile` must be a proper projection of `_allByFile`
+    // where the outer key is a subset and the inner entries are exactly
+    // the `scope === ''` subset of `_allByFile[key]`. A drift would
+    // indicate a bug in `appendFile()` where one map was updated but
+    // not the other.
+    if (process.env.NODE_ENV !== 'production' && !this._finalized) {
+      for (const [filePath, fileScopeTuples] of this._fileScopeByFile) {
+        const allEntries = this._allByFile.get(filePath);
+        if (allEntries === undefined) {
+          throw new Error(
+            `[BindingAccumulator] storage split drift: file ${filePath} has file-scope entries ` +
+              `but no _allByFile entry`,
+          );
+        }
+        const projectedCount = allEntries.filter((e) => e.scope === '').length;
+        if (projectedCount !== fileScopeTuples.length) {
+          throw new Error(
+            `[BindingAccumulator] storage split drift: file ${filePath} has ` +
+              `${fileScopeTuples.length} file-scope tuples but ${projectedCount} file-scope ` +
+              `entries in _allByFile`,
+          );
+        }
+      }
+    }
     this._finalized = true;
   }
 
@@ -120,8 +265,7 @@ export class BindingAccumulator {
    * **after** `finalize()`, subsequent `appendFile` calls throw the existing
    * "finalized" error.
    *
-   * Added in response to PR #743 Codex adversarial review (plan
-   * 2026-04-09-005): the pipeline disposes the accumulator after the
+   * Lifecycle note: the pipeline disposes the accumulator after the
    * ExportedTypeMap enrichment loop consumes its file-scope entries, so
    * the heap is released before Phase 14 (`runCrossFileBindingPropagation`)
    * and `runGraphAnalysisPhases` begin their long-running work. When Phase 9
@@ -145,13 +289,18 @@ export class BindingAccumulator {
    * Backward-compatible with the old workerTypeEnvBindings pattern.
    * Returns an empty array for an unknown file.
    *
-   * O(1) map lookup + O(n_file_scope) array construction — does NOT walk
-   * function-scope entries. See the `_fileScopeByFile` field comment for
-   * the storage split rationale (PR #743 review Low finding #1).
+   * O(1) map lookup + O(n_file_scope) defensive-copy construction — does
+   * NOT walk function-scope entries. See the `_fileScopeByFile` field
+   * comment for the storage split rationale.
+   *
+   * The return value is a shallow copy; mutating it does not affect
+   * subsequent reads or internal state. This encapsulation guard prevents
+   * a Phase 9 consumer from accidentally corrupting the accumulator via
+   * `acc.fileScopeEntries(p).push(...)` or similar.
    */
-  fileScopeEntries(filePath: string): [string, string][] {
+  fileScopeEntries(filePath: string): readonly (readonly [string, string])[] {
     const cached = this._fileScopeByFile.get(filePath);
-    return cached ?? [];
+    return cached ? cached.slice() : [];
   }
 
   /** Iterate over all file paths in insertion order. */
@@ -196,6 +345,15 @@ export class BindingAccumulator {
    * to UCS-2 (2 bytes/char) for non-Latin-1 code points. Source paths and type names
    * are typically all-ASCII, so actual heap cost is roughly half what this returns.
    * The pessimistic factor is intentional — better to over-budget than under-budget.
+   *
+   * **⚠ Cost profile**: O(totalBindings) — iterates every entry in
+   * `_allByFile` and reads three string `.length` properties per entry.
+   * At a typical repo scale (10k files × ~20 file-scope bindings) this is
+   * ~200k property reads per call. Call at most once per pipeline run,
+   * NOT per file, per chunk, or per progress tick. The current single
+   * call site is the dev-mode telemetry log at the pipeline finalize
+   * seam. Adding a per-file-progress caller would silently make it
+   * quadratic in repo size.
    */
   estimateMemoryBytes(): number {
     let total = 0;

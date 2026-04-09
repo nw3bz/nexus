@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
   BindingAccumulator,
+  enrichExportedTypeMap,
   type BindingEntry,
+  type EnrichmentGraphLookup,
+  type EnrichmentGraphNode,
 } from '../../src/core/ingestion/binding-accumulator.js';
 
 describe('BindingAccumulator', () => {
@@ -65,7 +68,7 @@ describe('BindingAccumulator', () => {
       acc.finalize();
       expect(() =>
         acc.appendFile('src/b.ts', [{ scope: '', varName: 'y', typeName: 'string' }]),
-      ).toThrow(/finalized/);
+      ).toThrow(/finalize/);
     });
 
     it('finalized getter returns true after finalize', () => {
@@ -152,7 +155,7 @@ describe('BindingAccumulator', () => {
     it('deserializes allScopeBindings from worker into accumulator', () => {
       const acc = new BindingAccumulator();
 
-      // Simulated worker output — PR #743 review follow-up:
+      // Simulated worker output:
       // After narrowing the worker IPC payload to file-scope only, the
       // emitted tuple shape is [varName, typeName]. Function-scope entries
       // are stripped at the parse-worker boundary; the sequential path's
@@ -199,7 +202,7 @@ describe('BindingAccumulator', () => {
     });
 
     it('worker IPC payload contains ONLY file-scope entries (narrowing guard)', () => {
-      // PR #743 review Critical finding: function-scope bindings were being
+      // Function-scope bindings were being
       // serialized over worker IPC with no consumer, costing ~4.9 MB. The
       // worker now uses typeEnv.fileScope() instead of typeEnv.allScopes(),
       // so `handleRequest@15 → db: Database` never crosses the IPC boundary.
@@ -260,7 +263,7 @@ describe('BindingAccumulator', () => {
   });
 
   // -------------------------------------------------------------------------
-  // PR #743 review Low finding #1: fileScopeEntries() must be O(n_file_scope),
+  // fileScopeEntries() must be O(n_file_scope),
   // not O(n_total). Storage is split into _allByFile + _fileScopeByFile so
   // reads skip function-scope entries entirely.
   // -------------------------------------------------------------------------
@@ -344,7 +347,7 @@ describe('BindingAccumulator', () => {
   });
 
   // -------------------------------------------------------------------------
-  // PR #743 review Medium finding #2: No integration test for the sequential
+  // Integration coverage for the sequential
   // path → accumulator → ExportedTypeMap enrichment loop at pipeline.ts
   // lines 1082-1110. This test mirrors that loop inline with a minimal
   // KnowledgeGraph-shaped mock, locking in the node-ID format contract
@@ -354,64 +357,21 @@ describe('BindingAccumulator', () => {
 
   describe('ExportedTypeMap enrichment (integration)', () => {
     /**
-     * Minimal graph-node shape mirroring what the enrichment loop reads.
-     * Matches the relevant subset of `GraphNode` in graph/types.ts — this
-     * test does not depend on the full graph module.
+     * Minimal graph backing for `enrichExportedTypeMap`. Matches the
+     * `EnrichmentGraphNode` shape from binding-accumulator.ts — which in
+     * turn matches the real `GraphNode.properties.isExported` access path
+     * used by the production `KnowledgeGraph`. Using this shape (rather
+     * than a flat `isExported` field) means a refactor of the graph's
+     * `properties` layout will fail this test, not silently pass.
      */
-    interface MockGraphNode {
-      id: string;
-      label: string; // 'Function' | 'Variable' | 'Const' | ...
-      name: string;
-      filePath: string;
-      isExported: boolean;
-    }
-
-    /**
-     * Inline reimplementation of the enrichment loop from
-     * `pipeline.ts:1082-1110`. Kept inline so this test asserts the
-     * current contract — if the pipeline code is refactored, this test
-     * must be updated alongside it. That coupling is intentional: the
-     * purpose is to lock in the node-ID format assumption.
-     */
-    function runEnrichmentLoop(
-      bindingAccumulator: BindingAccumulator,
-      nodesById: Map<string, MockGraphNode>,
-      exportedTypeMap: Map<string, Map<string, string>>,
-    ): void {
-      if (bindingAccumulator.fileCount === 0) return;
-      for (const filePath of bindingAccumulator.files()) {
-        for (const [name, type] of bindingAccumulator.fileScopeEntries(filePath)) {
-          // Try Function, Variable, Const ID formats in priority order —
-          // mirrors the pipeline loop exactly.
-          const candidateIds = [
-            `Function:${filePath}:${name}`,
-            `Variable:${filePath}:${name}`,
-            `Const:${filePath}:${name}`,
-          ];
-          let matchedNode: MockGraphNode | undefined;
-          for (const id of candidateIds) {
-            const node = nodesById.get(id);
-            if (node !== undefined) {
-              matchedNode = node;
-              break;
-            }
-          }
-          if (matchedNode === undefined) continue;
-          if (!matchedNode.isExported) continue;
-          let fileMap = exportedTypeMap.get(filePath);
-          if (fileMap === undefined) {
-            fileMap = new Map();
-            exportedTypeMap.set(filePath, fileMap);
-          }
-          // Tier 0 priority guard: if the SymbolTable already populated an
-          // entry for this name, don't overwrite it. Mirrors
-          // `pipeline.ts:1104-1108` — without this, a worker-path binding
-          // could clobber a higher-quality Tier 0 SymbolTable entry.
-          if (!fileMap.has(name)) {
-            fileMap.set(name, type);
-          }
-        }
+    function makeGraphLookup(
+      nodes: Array<{ id: string; isExported: boolean }>,
+    ): EnrichmentGraphLookup {
+      const byId = new Map<string, EnrichmentGraphNode>();
+      for (const n of nodes) {
+        byId.set(n.id, { id: n.id, properties: { isExported: n.isExported } });
       }
+      return { getNode: (id) => byId.get(id) };
     }
 
     it('enriches exportedTypeMap with an exported Function node', () => {
@@ -421,22 +381,12 @@ describe('BindingAccumulator', () => {
       ]);
       acc.finalize();
 
-      const nodesById = new Map<string, MockGraphNode>([
-        [
-          'Function:src/utils.ts:helper',
-          {
-            id: 'Function:src/utils.ts:helper',
-            label: 'Function',
-            name: 'helper',
-            filePath: 'src/utils.ts',
-            isExported: true,
-          },
-        ],
-      ]);
+      const graph = makeGraphLookup([{ id: 'Function:src/utils.ts:helper', isExported: true }]);
       const exportedTypeMap = new Map<string, Map<string, string>>();
 
-      runEnrichmentLoop(acc, nodesById, exportedTypeMap);
+      const enriched = enrichExportedTypeMap(acc, graph, exportedTypeMap);
 
+      expect(enriched).toBe(1);
       expect(exportedTypeMap.get('src/utils.ts')?.get('helper')).toBe('(arg: string) => User');
     });
 
@@ -445,23 +395,12 @@ describe('BindingAccumulator', () => {
       acc.appendFile('src/app.ts', [{ scope: '', varName: 'dbClient', typeName: 'Database' }]);
       acc.finalize();
 
-      const nodesById = new Map<string, MockGraphNode>([
-        [
-          'Variable:src/app.ts:dbClient',
-          {
-            id: 'Variable:src/app.ts:dbClient',
-            label: 'Variable',
-            name: 'dbClient',
-            filePath: 'src/app.ts',
-            isExported: false, // NOT exported
-          },
-        ],
-      ]);
+      const graph = makeGraphLookup([{ id: 'Variable:src/app.ts:dbClient', isExported: false }]);
       const exportedTypeMap = new Map<string, Map<string, string>>();
 
-      runEnrichmentLoop(acc, nodesById, exportedTypeMap);
+      const enriched = enrichExportedTypeMap(acc, graph, exportedTypeMap);
 
-      // Non-exported → enrichment loop's isExported check filters it out.
+      expect(enriched).toBe(0);
       expect(exportedTypeMap.has('src/app.ts')).toBe(false);
     });
 
@@ -470,22 +409,12 @@ describe('BindingAccumulator', () => {
       acc.appendFile('src/config.ts', [{ scope: '', varName: 'API_URL', typeName: 'string' }]);
       acc.finalize();
 
-      const nodesById = new Map<string, MockGraphNode>([
-        [
-          'Const:src/config.ts:API_URL',
-          {
-            id: 'Const:src/config.ts:API_URL',
-            label: 'Const',
-            name: 'API_URL',
-            filePath: 'src/config.ts',
-            isExported: true,
-          },
-        ],
-      ]);
+      const graph = makeGraphLookup([{ id: 'Const:src/config.ts:API_URL', isExported: true }]);
       const exportedTypeMap = new Map<string, Map<string, string>>();
 
-      runEnrichmentLoop(acc, nodesById, exportedTypeMap);
+      const enriched = enrichExportedTypeMap(acc, graph, exportedTypeMap);
 
+      expect(enriched).toBe(1);
       expect(exportedTypeMap.get('src/config.ts')?.get('API_URL')).toBe('string');
     });
 
@@ -495,20 +424,23 @@ describe('BindingAccumulator', () => {
       acc.finalize();
 
       // Empty graph — no nodes at any of the candidate IDs.
-      const nodesById = new Map<string, MockGraphNode>();
+      const graph = makeGraphLookup([]);
       const exportedTypeMap = new Map<string, Map<string, string>>();
 
-      // Must not throw; enrichment loop's `continue` path fires for every
+      // Must not throw; enrichment's `continue` path fires for every
       // unmatched entry.
-      expect(() => runEnrichmentLoop(acc, nodesById, exportedTypeMap)).not.toThrow();
+      let enriched = -1;
+      expect(() => {
+        enriched = enrichExportedTypeMap(acc, graph, exportedTypeMap);
+      }).not.toThrow();
+      expect(enriched).toBe(0);
       expect(exportedTypeMap.has('src/missing.ts')).toBe(false);
     });
 
     it('does not overwrite existing SymbolTable entry (Tier 0 priority)', () => {
       // When the SymbolTable's tier-0 extraction pass has already populated
-      // an entry for a name, the accumulator enrichment loop must NOT
-      // overwrite it with a (lower-quality) worker-path binding. Guards
-      // against `pipeline.ts:1104-1108` regressing the priority check.
+      // an entry for a name, the accumulator enrichment must NOT overwrite
+      // it with a (lower-quality) worker-path binding.
       const acc = new BindingAccumulator();
       acc.appendFile('src/utils.ts', [
         { scope: '', varName: 'helper', typeName: 'WorkerInferredType' },
@@ -521,30 +453,58 @@ describe('BindingAccumulator', () => {
         ['src/utils.ts', new Map([['helper', 'SymbolTableAuthoritativeType']])],
       ]);
 
-      const nodesById = new Map<string, MockGraphNode>([
-        [
-          'Function:src/utils.ts:helper',
-          {
-            id: 'Function:src/utils.ts:helper',
-            label: 'Function',
-            name: 'helper',
-            filePath: 'src/utils.ts',
-            isExported: true,
-          },
-        ],
-      ]);
+      const graph = makeGraphLookup([{ id: 'Function:src/utils.ts:helper', isExported: true }]);
 
-      runEnrichmentLoop(acc, nodesById, exportedTypeMap);
+      const enriched = enrichExportedTypeMap(acc, graph, exportedTypeMap);
 
       // Tier 0 wins — the authoritative SymbolTable type survives.
+      expect(enriched).toBe(0);
       expect(exportedTypeMap.get('src/utils.ts')?.get('helper')).toBe(
         'SymbolTableAuthoritativeType',
       );
     });
+
+    it('handles nodes whose properties object is undefined (production shape)', () => {
+      // Regression guard: the real KnowledgeGraph stores isExported under
+      // `node.properties.isExported` and properties may be undefined for
+      // some node kinds. The enrichment guard `!node?.properties?.isExported`
+      // must treat an undefined properties object as non-exported.
+      const acc = new BindingAccumulator();
+      acc.appendFile('src/edge.ts', [{ scope: '', varName: 'helper', typeName: 'Helper' }]);
+      acc.finalize();
+
+      const graph: EnrichmentGraphLookup = {
+        getNode: (id) =>
+          id === 'Function:src/edge.ts:helper'
+            ? ({ id, properties: undefined } satisfies EnrichmentGraphNode)
+            : undefined,
+      };
+      const exportedTypeMap = new Map<string, Map<string, string>>();
+
+      const enriched = enrichExportedTypeMap(acc, graph, exportedTypeMap);
+
+      expect(enriched).toBe(0);
+      expect(exportedTypeMap.has('src/edge.ts')).toBe(false);
+    });
+
+    it('returns 0 and leaves exportedTypeMap untouched when accumulator is empty', () => {
+      const acc = new BindingAccumulator();
+      acc.finalize();
+
+      const graph = makeGraphLookup([{ id: 'Function:src/utils.ts:helper', isExported: true }]);
+      const existingMap = new Map<string, Map<string, string>>([
+        ['src/existing.ts', new Map([['keep', 'Type']])],
+      ]);
+
+      const enriched = enrichExportedTypeMap(acc, graph, existingMap);
+
+      expect(enriched).toBe(0);
+      expect(existingMap.size).toBe(1);
+      expect(existingMap.get('src/existing.ts')?.get('keep')).toBe('Type');
+    });
   });
 
   // -------------------------------------------------------------------------
-  // PR #743 Codex adversarial review follow-up (plan 2026-04-09-005):
   // BindingAccumulator.dispose() releases the accumulator's heap footprint
   // after the enrichment loop has consumed everything it needs. Post-dispose
   // reads return empty/undefined without throwing, matching "never-appended"
@@ -607,7 +567,7 @@ describe('BindingAccumulator', () => {
       // Finalized, so appends throw even post-dispose.
       expect(() =>
         acc.appendFile('src/b.ts', [{ scope: '', varName: 'y', typeName: 'Y' }]),
-      ).toThrow(/finalized/);
+      ).toThrow(/finalize/);
       // But reads return empty.
       expect(acc.fileCount).toBe(0);
       expect(acc.totalBindings).toBe(0);
@@ -631,6 +591,63 @@ describe('BindingAccumulator', () => {
       // After dispose, the iteration over `_allByFile` in estimateMemoryBytes
       // has zero files to walk, so the returned value is exactly 0.
       expect(acc.estimateMemoryBytes()).toBe(0);
+    });
+
+    it('disposed getter reflects dispose state', () => {
+      // Locks in the `get disposed()` contract for API symmetry with
+      // `get finalized()`. Without this test, a trivial wrong impl like
+      // `get disposed() { return this._finalized; }` passes everything.
+      const acc = new BindingAccumulator();
+      expect(acc.disposed).toBe(false);
+      acc.appendFile('src/a.ts', [{ scope: '', varName: 'x', typeName: 'X' }]);
+      expect(acc.disposed).toBe(false);
+      acc.dispose();
+      expect(acc.disposed).toBe(true);
+      acc.dispose(); // idempotent
+      expect(acc.disposed).toBe(true);
+    });
+
+    it('dispose then finalize: appends throw, state is consistent', () => {
+      // Orthogonality check: dispose() and finalize() are independent
+      // lifecycle dimensions. dispose → finalize → appendFile should throw
+      // the finalized error (because finalize was called), and the
+      // accumulator should report both flags as true.
+      const acc = new BindingAccumulator();
+      acc.appendFile('src/a.ts', [{ scope: '', varName: 'x', typeName: 'X' }]);
+      acc.dispose();
+      acc.finalize();
+      expect(acc.disposed).toBe(true);
+      expect(acc.finalized).toBe(true);
+      expect(() =>
+        acc.appendFile('src/b.ts', [{ scope: '', varName: 'y', typeName: 'Y' }]),
+      ).toThrow(/finalize/);
+    });
+
+    it('fileScopeEntries returns a defensive copy — mutation does not corrupt state', () => {
+      // Encapsulation guard: the cached internal array must not be exposed
+      // by reference. Mutating the returned array should not affect
+      // subsequent reads.
+      const acc = new BindingAccumulator();
+      acc.appendFile('src/a.ts', [
+        { scope: '', varName: 'x', typeName: 'X' },
+        { scope: '', varName: 'y', typeName: 'Y' },
+      ]);
+
+      const firstRead = acc.fileScopeEntries('src/a.ts');
+      expect(firstRead).toHaveLength(2);
+
+      // Try to corrupt internal state via the returned array. The
+      // `readonly` return type is compile-time only; cast to mutable at
+      // runtime to simulate a consumer that bypasses TypeScript.
+      const mutableView = firstRead as unknown as [string, string][];
+      mutableView.push(['corrupted', 'Corrupt']);
+      mutableView.length = 0;
+
+      // Subsequent reads are unaffected by the mutation attempt.
+      const secondRead = acc.fileScopeEntries('src/a.ts');
+      expect(secondRead).toHaveLength(2);
+      expect(secondRead[0][0]).toBe('x');
+      expect(secondRead[1][0]).toBe('y');
     });
   });
 });

@@ -156,7 +156,15 @@ export function buildImportedRawReturnTypes(
 }
 
 /** Collect resolved type bindings for exported file-scope symbols.
- *  Uses graph node isExported flag — does NOT require isExported on SymbolDefinition. */
+ *  Uses graph node isExported flag — does NOT require isExported on SymbolDefinition.
+ *
+ *  **Counterpart**: the worker path populates `exportedTypeMap` via the
+ *  accumulator enrichment loop in `pipeline.ts` (search for "Worker path
+ *  quality enrichment"). Both sites populate the same map with subtly
+ *  different export-check semantics — this site uses SymbolTable +
+ *  graph lookup, the worker loop uses three-candidate-ID graph lookup.
+ *  They must stay in sync until Phase 9 unifies them. If you edit one,
+ *  check the other. */
 function collectExportedBindings(
   typeEnv: { fileScope(): ReadonlyMap<string, string> },
   filePath: string,
@@ -735,7 +743,11 @@ export const processCalls = async (
       const fileExports = collectExportedBindings(typeEnv, file.path, ctx.symbols, graph);
       if (fileExports) exportedTypeMap.set(file.path, fileExports);
     }
-    // Flush all scopes into accumulator for Phase 9+ cross-file propagation
+    // Flush file-scope bindings into the accumulator. `flush()` is narrowed
+    // to iterate only FILE_SCOPE entries (type-env.ts) — function-scope
+    // bindings are dropped at the flush boundary until a Phase 9 consumer
+    // lands. See type-env.ts::flush() JSDoc for the dual-site reversion
+    // checklist (this sequential path + the worker path in parse-worker.ts).
     if (bindingAccumulator) {
       typeEnv.flush(file.path, bindingAccumulator);
     }
