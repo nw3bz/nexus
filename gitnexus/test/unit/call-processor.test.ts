@@ -2493,6 +2493,152 @@ describe('processCalls — D0 MRO fast path (SM-10)', () => {
     expect(authSave).toBeDefined();
     expect(userSave).toBeUndefined();
   });
+
+  it('module-alias guard (real homonym): both files imported, alias narrows typed member call to aliased file', async () => {
+    // Codex SM-19 adversarial review Finding 1: When BOTH homonym files are
+    // imported by the caller, import-scoped tiering no longer narrows the
+    // tiered pool — the dispatcher sees two `save` candidates. Module-alias
+    // narrowing is the only remaining disambiguation signal. The typed-member
+    // branch must consult the alias map or null-route silently.
+    const authModFile = 'src/auth_mod.py';
+    const userModFile = 'src/user_mod.py';
+    const appFile = 'src/app.py';
+    const authUserId = 'class:src/auth_mod.py:User';
+    const userUserId = 'class:src/user_mod.py:User';
+    const authSaveId = 'method:src/auth_mod.py:save';
+    const userSaveId = 'method:src/user_mod.py:save';
+
+    ctx.symbols.add(authModFile, 'User', authUserId, 'Class');
+    ctx.symbols.add(userModFile, 'User', userUserId, 'Class');
+    ctx.symbols.add(authModFile, 'save', authSaveId, 'Method', {
+      ownerId: authUserId,
+      returnType: 'bool',
+    });
+    ctx.symbols.add(userModFile, 'save', userSaveId, 'Method', {
+      ownerId: userUserId,
+      returnType: 'bool',
+    });
+    // BOTH files imported by app.py — creates real ambiguity in tiered pool.
+    ctx.importMap.set(appFile, new Set([authModFile, userModFile]));
+    // Alias: `auth` points to auth_mod.py.
+    ctx.moduleAliasMap.set(appFile, new Map([['auth', authModFile]]));
+
+    // Call `auth.User.save(user)` — receiverName is `auth` (matches alias),
+    // receiverTypeName is `User` (the class). This is the class-as-receiver
+    // static-style pattern parse-worker emits when it sees `auth.User.save(x)`.
+    const calls: ExtractedCall[] = [
+      {
+        filePath: appFile,
+        calledName: 'save',
+        sourceId: 'Function:src/app.py:run',
+        argCount: 1,
+        callForm: 'member',
+        receiverName: 'auth',
+        receiverTypeName: 'User',
+      },
+    ];
+
+    await processCallsFromExtracted(graph, calls, ctx);
+
+    const rels = graph.relationships.filter((r) => r.type === 'CALLS');
+    // Module alias narrows to auth_mod.py. Without it the dispatcher would
+    // null-route because both User classes own a `save` method and there's
+    // no heritage or overload signal to pick between them.
+    expect(rels).toHaveLength(1);
+    expect(rels[0].targetId).toBe(authSaveId);
+  });
+
+  it('constructor overload disambiguation: same-arity ownerless constructors picked via preComputedArgTypes', async () => {
+    // Codex SM-19 adversarial review Finding 2: When two homonym constructors
+    // across different files have the same arity but different parameter types,
+    // `resolveStaticCall` correctly bails (step 3 ambiguity → step 4 bail because
+    // the tiered pool contains Constructor nodes). Before this fix the dispatcher
+    // then fell through to `singleCandidate` which also bailed because two
+    // constructors survive arity filtering. With overload disambiguation after
+    // `resolveStaticCall`, `preComputedArgTypes` picks the string overload.
+    const userFile = 'src/models/User.ts';
+    const repoFile = 'src/models/Repo.ts';
+    const appFile = 'src/app.ts';
+    const userClassId = 'Class:src/models/User.ts:User';
+    const repoClassId = 'Class:src/models/Repo.ts:User';
+    const userCtorId = 'Constructor:src/models/User.ts:User(string)';
+    const repoCtorId = 'Constructor:src/models/Repo.ts:User(number)';
+
+    ctx.symbols.add(userFile, 'User', userClassId, 'Class');
+    ctx.symbols.add(repoFile, 'User', repoClassId, 'Class');
+    ctx.symbols.add(userFile, 'User', userCtorId, 'Constructor', {
+      ownerId: userClassId,
+      parameterCount: 1,
+      parameterTypes: ['string'],
+    });
+    ctx.symbols.add(repoFile, 'User', repoCtorId, 'Constructor', {
+      ownerId: repoClassId,
+      parameterCount: 1,
+      parameterTypes: ['number'],
+    });
+    ctx.importMap.set(appFile, new Set([userFile, repoFile]));
+
+    const calls: ExtractedCall[] = [
+      {
+        filePath: appFile,
+        calledName: 'User',
+        sourceId: 'Function:src/app.ts:main',
+        argCount: 1,
+        callForm: 'constructor',
+        argTypes: ['string'],
+      },
+    ];
+
+    await processCallsFromExtracted(graph, calls, ctx);
+
+    const rels = graph.relationships.filter((r) => r.type === 'CALLS');
+    expect(rels).toHaveLength(1);
+    expect(rels[0].targetId).toBe(userCtorId);
+  });
+
+  it('constructor overload disambiguation: null-routes when disambiguation cannot pick unique survivor', async () => {
+    // Control test for Finding 2 fix: when `preComputedArgTypes` does not
+    // match any candidate uniquely, the dispatcher must null-route rather
+    // than pick arbitrarily. Preserves SM-10 R3.
+    const userFile = 'src/models/User.ts';
+    const repoFile = 'src/models/Repo.ts';
+    const appFile = 'src/app.ts';
+    const userClassId = 'Class:src/models/User.ts:User';
+    const repoClassId = 'Class:src/models/Repo.ts:User';
+    const userCtorId = 'Constructor:src/models/User.ts:User(string)';
+    const repoCtorId = 'Constructor:src/models/Repo.ts:User(string)';
+
+    ctx.symbols.add(userFile, 'User', userClassId, 'Class');
+    ctx.symbols.add(repoFile, 'User', repoClassId, 'Class');
+    // Both constructors take `string` — genuinely ambiguous.
+    ctx.symbols.add(userFile, 'User', userCtorId, 'Constructor', {
+      ownerId: userClassId,
+      parameterCount: 1,
+      parameterTypes: ['string'],
+    });
+    ctx.symbols.add(repoFile, 'User', repoCtorId, 'Constructor', {
+      ownerId: repoClassId,
+      parameterCount: 1,
+      parameterTypes: ['string'],
+    });
+    ctx.importMap.set(appFile, new Set([userFile, repoFile]));
+
+    const calls: ExtractedCall[] = [
+      {
+        filePath: appFile,
+        calledName: 'User',
+        sourceId: 'Function:src/app.ts:main',
+        argCount: 1,
+        callForm: 'constructor',
+        argTypes: ['string'],
+      },
+    ];
+
+    await processCallsFromExtracted(graph, calls, ctx);
+
+    const rels = graph.relationships.filter((r) => r.type === 'CALLS');
+    expect(rels).toHaveLength(0);
+  });
 });
 
 // ---- processAssignmentsFromExtracted: Phase 9 accumulator fallback ----

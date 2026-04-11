@@ -1687,12 +1687,43 @@ const resolveCallTarget = (
     );
   }
   if (call.callForm === 'constructor') {
-    return (
-      resolveStaticCall(call.calledName, currentFile, ctx, call.argCount, tiered) ??
-      singleCandidate(tiered, call.argCount, 'constructor')
+    const staticResult = resolveStaticCall(
+      call.calledName,
+      currentFile,
+      ctx,
+      call.argCount,
+      tiered,
     );
+    if (staticResult) return staticResult;
+
+    // Codex SM-19 Finding 2: When `resolveStaticCall` bails on ambiguous or
+    // ownerless Constructor pools, give overload/arg-type disambiguation a
+    // chance before null-routing. Only engages when the caller supplied a
+    // narrowing signal — preserves SM-10 R3 for genuinely ambiguous cases.
+    if (overloadHints || preComputedArgTypes) {
+      const ctorPool = filterCallableCandidates(tiered.candidates, call.argCount, 'constructor');
+      if (ctorPool.length > 1) {
+        const disambiguated = overloadHints
+          ? tryOverloadDisambiguation(ctorPool, overloadHints)
+          : preComputedArgTypes
+            ? matchCandidatesByArgTypes(ctorPool, preComputedArgTypes)
+            : null;
+        if (disambiguated) return toResolveResult(disambiguated, tiered.tier);
+      }
+    }
+    return singleCandidate(tiered, call.argCount, 'constructor');
   }
   if (call.receiverTypeName) {
+    // Codex SM-19 Finding 1: Consult module-alias narrowing BEFORE the
+    // owner-scoped / file-scoped resolvers. When the caller imports two
+    // homonym receiver types from different files, import-scoped tiering
+    // does not narrow (both files are in scope) and the owner/file fallback
+    // sees genuine ambiguity. An active module alias on `call.receiverName`
+    // is the only remaining disambiguation signal; without this call the
+    // dispatcher null-routes silently and drops a valid CALLS edge.
+    const aliasResult = resolveModuleAliasedCall(call, currentFile, ctx, widenCache, tiered);
+    if (aliasResult) return aliasResult;
+
     // Skip the owner-scoped MRO path when the tiered pool has genuine
     // overload ambiguity that needs D1-D4+E handling, not D0.
     const skipMember =

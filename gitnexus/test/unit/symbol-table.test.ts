@@ -1753,14 +1753,15 @@ describe('resolveCallTarget thin dispatcher (SM-19)', () => {
     ctx = createResolutionContext();
   });
 
-  it('module alias homonyms: thin dispatcher returns null (no D1-D4 fuzzy path)', () => {
+  it('module alias homonyms: dispatcher resolves via module-alias narrowing to aliased file', () => {
     // Python-style: `import auth; auth.User.save()` where BOTH auth.py and
     // other.py define a `User` class with a `save` method.
     //
-    // Before SM-19, resolveCallTarget had D1-D4 fuzzy widening that could
-    // disambiguate via module-alias narrowing. The thin dispatcher delegates
-    // to resolveMemberCall which sees two homonym Users and correctly returns
-    // null (genuine ambiguity — no fuzzy path to break the tie).
+    // Codex SM-19 adversarial review Finding 1: the thin dispatcher must
+    // consult module-alias narrowing for typed member calls BEFORE falling
+    // through to owner/file-scoped resolvers. With both homonym files
+    // imported, owner-scoped resolution sees genuine ambiguity and the only
+    // remaining disambiguation signal is the alias on `call.receiverName`.
     ctx.symbols.add('src/auth.py', 'User', 'class:auth:User', 'Class');
     ctx.symbols.add('src/auth.py', 'save', 'method:auth:User:save', 'Method', {
       returnType: 'None',
@@ -1785,9 +1786,9 @@ describe('resolveCallTarget thin dispatcher (SM-19)', () => {
       ctx,
     );
 
-    // Thin dispatcher delegates to resolveMemberCall which returns null for
-    // genuine homonym ambiguity (both Users own `save`).
-    expect(result).toBeNull();
+    // Module-alias narrowing picks auth.py's save, not other.py's.
+    expect(result).not.toBeNull();
+    expect(result?.nodeId).toBe('method:auth:User:save');
   });
 
   it('overloadHints ignored for member calls — resolveMemberCall resolves directly', () => {
