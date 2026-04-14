@@ -1449,6 +1449,20 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
           await withLbugDb(lbugPath, async () => {
             const { runEmbeddingPipeline } =
               await import('../core/embeddings/embedding-pipeline.js');
+            // Skip nodes that already have embeddings — Kuzu forbids SET on vector-indexed properties.
+            let skipNodeIds: Set<string> | undefined;
+            try {
+              const rows = await executeQuery(
+                'MATCH (e:CodeEmbedding) RETURN e.nodeId AS nodeId',
+              );
+              if (rows && rows.length > 0) {
+                skipNodeIds = new Set(
+                  rows.map((r: any) => r.nodeId ?? r[0]).filter(Boolean),
+                );
+              }
+            } catch {
+              /* CodeEmbedding table may not exist yet */
+            }
             await runEmbeddingPipeline(executeQuery, executeWithReusedStatement, (p) => {
               embedJobManager.updateJob(job.id, {
                 progress: {
@@ -1467,7 +1481,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
                             : `${p.phase} (${p.percent}%)`,
                 },
               });
-            });
+            }, {}, skipNodeIds);
           });
 
           clearTimeout(embedTimeout);
