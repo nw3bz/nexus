@@ -40,7 +40,7 @@ interface MockNode {
 }
 
 /** Create a minimal mock SyntaxNode for capture map entries. */
-function makeNode(text: string, type = 'identifier', parent?: MockNode | null): MockNode {
+function makeNode(text: string, type = 'identifier', parent?: MockNode): MockNode {
   return { type, text, parent: parent ?? null };
 }
 

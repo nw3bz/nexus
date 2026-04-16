@@ -1706,7 +1706,7 @@ const processFileGroup = (
                 captureMap['call']!,
                 { filePath: file.path, language },
               );
-              if (heritageItems && heritageItems.length > 0) {
+              if (heritageItems !== null) {
                 for (const item of heritageItems) {
                   result.heritage.push({
                     filePath: file.path,
