@@ -28,22 +28,23 @@ function findEnclosingClassName(callNode: SyntaxNode): string | null {
 }
 
 /** Ruby heritage call names that express mixin inclusion. */
-const RUBY_HERITAGE_CALL_NAMES: ReadonlySet<string> = new Set([
-  'include',
-  'extend',
-  'prepend',
-]);
+const RUBY_HERITAGE_CALL_NAMES: ReadonlySet<string> = new Set(['include', 'extend', 'prepend']);
 
 /**
  * Ruby heritage extraction config.
  *
- * Ruby has no tree-sitter heritage captures — inheritance is expressed
- * through the class definition syntax (`class A < B`) which produces
- * standard @heritage.extends captures, and through method calls
- * (include/extend/prepend) which are call-based heritage.
+ * Ruby expresses inheritance in two ways, and only one of them has
+ * dedicated tree-sitter heritage captures:
  *
- * The callBasedHeritage hook absorbs the mixin routing logic that was
- * previously in call-routing.ts (routeRubyCall).
+ * 1. Class inheritance (`class A < B`) produces standard
+ *    `@heritage.extends` captures and flows through the generic
+ *    capture-based `extract` hook (not defined here — the factory
+ *    handles it).
+ * 2. Mixin calls (`include`/`extend`/`prepend`) have no dedicated
+ *    heritage captures; they surface as ordinary call sites. The
+ *    `callBasedHeritage` hook below intercepts them before the call
+ *    router, absorbing the mixin routing logic that previously lived
+ *    in call-routing.ts (routeRubyCall).
  */
 export const rubyHeritageConfig: HeritageExtractionConfig = {
   language: SupportedLanguages.Ruby,

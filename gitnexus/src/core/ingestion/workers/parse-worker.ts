@@ -1703,7 +1703,7 @@ const processFileGroup = (
             if (provider.heritageExtractor?.extractFromCall) {
               const heritageItems = provider.heritageExtractor.extractFromCall(
                 calledName,
-                captureMap['call']!,
+                callNode,
                 { filePath: file.path, language },
               );
               if (heritageItems !== null) {
@@ -1913,10 +1913,14 @@ const processFileGroup = (
               kind: item.kind,
             });
           }
+          // When the extractor consumes the match, skip symbol processing below.
           if (heritageItems.length > 0) {
             continue;
           }
         }
+        // Fallback: the extractor returned [] (or is absent), but the match still
+        // carries a heritage-specific capture. The match belongs to a heritage
+        // clause and must not fall through to generic symbol processing.
         if (
           captureMap['heritage.extends'] ||
           captureMap['heritage.implements'] ||
