@@ -365,11 +365,22 @@ export const lookupMethodByOwnerWithMRO = (
     // Fall back to the BFS ancestor walk for depth > 1. Order is best-effort;
     // Ruby's actual MRO for transitive mixins is rare and under-specified
     // (documented in architecture docs as deferred work).
+    //
+    // O(1) skip-check via Sets:
+    //   - `walkedDirect` covers parents already visited in steps 1-3.
+    //   - `singletonOnly` covers direct `extend` providers: they belong to
+    //     the singleton MRO and must NEVER appear in instance dispatch.
+    // Building Sets once before the BFS loop avoids O(n²) `Array.includes`
+    // on large mixin hierarchies.
+    const walkedDirect = new Set<string>(prependParents);
+    for (const id of otherParents) walkedDirect.add(id);
+    const singletonOnly = new Set<string>(
+      heritageMap.getSingletonAncestry(ownerNodeId).map((e) => e.parentId),
+    );
     for (const ancestorId of heritageMap.getAncestors(ownerNodeId)) {
-      // Skip direct parents we already walked above.
-      if (prependParents.includes(ancestorId)) continue;
-      if (otherParents.includes(ancestorId)) continue;
       if (ancestorId === ownerNodeId) continue;
+      if (walkedDirect.has(ancestorId)) continue;
+      if (singletonOnly.has(ancestorId)) continue;
       const method = model.methods.lookupMethodByOwner(ancestorId, methodName, argCount);
       if (method) return method;
     }

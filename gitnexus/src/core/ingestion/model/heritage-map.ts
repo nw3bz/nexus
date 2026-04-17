@@ -304,27 +304,65 @@ export const buildHeritageMap = (
   };
 
   /**
+   * Lazy-computed per-owner split of direct parents into instance-dispatch
+   * (non-`extend`) and singleton-dispatch (`extend`-only) views. Memoized on
+   * first request so the `.filter()` pass happens at most once per owner per
+   * HeritageMap lifetime, not per call-site dispatch.
+   *
+   * Shared empty-array sentinels for owners with no entries in a given view
+   * avoid per-call allocation when the split is asymmetric (common Ruby case:
+   * a class has `include` but no `extend`, so its singleton view is empty).
+   */
+  const EMPTY_PARENT_ENTRIES: readonly ParentEntry[] = [];
+  const splitCache = new Map<
+    string,
+    { instance: readonly ParentEntry[]; singleton: readonly ParentEntry[] }
+  >();
+
+  const splitForOwner = (
+    childNodeId: string,
+  ): { instance: readonly ParentEntry[]; singleton: readonly ParentEntry[] } => {
+    let cached = splitCache.get(childNodeId);
+    if (cached) return cached;
+    const entries = entriesFor(childNodeId);
+    if (!entries || entries.length === 0) {
+      cached = { instance: EMPTY_PARENT_ENTRIES, singleton: EMPTY_PARENT_ENTRIES };
+    } else {
+      const instance: ParentEntry[] = [];
+      const singleton: ParentEntry[] = [];
+      for (const e of entries) {
+        if (e.kind === 'extend') singleton.push(e);
+        else instance.push(e);
+      }
+      cached = {
+        instance: instance.length === 0 ? EMPTY_PARENT_ENTRIES : instance,
+        singleton: singleton.length === 0 ? EMPTY_PARENT_ENTRIES : singleton,
+      };
+    }
+    splitCache.set(childNodeId, cached);
+    return cached;
+  };
+
+  /**
    * Instance-dispatch ancestry walk. Excludes `extend` (singleton-only).
    * For kind-aware consumers (Ruby MRO): walks parents in source-insertion
    * order. The consumer is responsible for interleaving self / reversing
    * prepend order / etc. This method preserves raw declaration order.
+   *
+   * Result is cached per owner; repeat calls return the same array.
    */
-  const getInstanceAncestry = (childNodeId: string): readonly ParentEntry[] => {
-    const entries = entriesFor(childNodeId);
-    if (!entries) return [];
-    return entries.filter((e) => e.kind !== 'extend');
-  };
+  const getInstanceAncestry = (childNodeId: string): readonly ParentEntry[] =>
+    splitForOwner(childNodeId).instance;
 
   /**
    * Singleton-dispatch ancestry walk. Only `extend` parents. For non-Ruby
    * languages this is always empty (no language currently produces `extend`
    * heritage records outside Ruby).
+   *
+   * Result is cached per owner; repeat calls return the same array.
    */
-  const getSingletonAncestry = (childNodeId: string): readonly ParentEntry[] => {
-    const entries = entriesFor(childNodeId);
-    if (!entries) return [];
-    return entries.filter((e) => e.kind === 'extend');
-  };
+  const getSingletonAncestry = (childNodeId: string): readonly ParentEntry[] =>
+    splitForOwner(childNodeId).singleton;
 
   const getImplementorFiles = (interfaceName: string): ReadonlySet<string> => {
     return implementorFiles.get(interfaceName) ?? EMPTY_SET;

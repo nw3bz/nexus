@@ -14,15 +14,24 @@ type ReceiverSource = ReceiverEnriched['receiverSource'];
 
 /**
  * DAG stage 4 fallback: used when `selectDispatch` is absent or returns null.
- * constructor→`{primary:'constructor'}`, member→`{primary:'owner-scoped'}`,
- * free/undefined→`{primary:'free'}`.
+ * Preserves pre-DAG dispatch semantics:
+ *   - 'constructor'         → constructor branch
+ *   - 'free'                → free branch (admits Swift/Kotlin class-target fast path)
+ *   - 'member' or undefined → owner-scoped branch
+ *
+ * `undefined` callForm MUST route through owner-scoped (not free) so bare
+ * identifiers without a classified shape do NOT trigger `resolveFreeCall`'s
+ * class-target fast path. Without a `receiverTypeName`, the owner-scoped
+ * branch falls through to `resolveModuleAliasedCall` + `singleCandidate`,
+ * matching legacy behavior where non-callable symbols (Class, Interface)
+ * null-route instead of producing spurious Constructor edges.
  */
 const defaultDispatchDecision = (
   callForm: 'free' | 'member' | 'constructor' | undefined,
 ): DispatchDecision => {
   if (callForm === 'constructor') return { primary: 'constructor' };
-  if (callForm === 'member') return { primary: 'owner-scoped' };
-  return { primary: 'free' };
+  if (callForm === 'free') return { primary: 'free' };
+  return { primary: 'owner-scoped' };
 };
 import Parser from 'tree-sitter';
 import type { ResolutionContext } from './model/resolution-context.js';
