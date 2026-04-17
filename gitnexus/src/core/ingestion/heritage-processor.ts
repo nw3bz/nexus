@@ -19,7 +19,7 @@ import { ASTCache } from './ast-cache.js';
 import Parser from 'tree-sitter';
 import { isLanguageAvailable, loadParser, loadLanguage } from '../tree-sitter/parser-loader.js';
 import { generateId } from '../../lib/utils.js';
-import { getLanguageFromFilename, type SupportedLanguages } from 'gitnexus-shared';
+import { getLanguageFromFilename, type NodeLabel, type SupportedLanguages } from 'gitnexus-shared';
 import { isVerboseIngestionEnabled } from './utils/verbose.js';
 import { yieldToEventLoop } from './utils/event-loop.js';
 import { getProvider } from './languages/index.js';
@@ -149,11 +149,21 @@ const resolveAndAddHeritageEdge = (
     item.kind === 'extend' ||
     item.kind === 'prepend'
   ) {
+    // Fallback label for an unresolved child name. Rust `trait-impl` children
+    // are structs; Ruby mixin children are classes or modules (Trait). For
+    // Ruby mixin kinds the common case resolves through the type registry
+    // post-plan-001, so the fallback only fires for true-unresolved references
+    // (e.g. mixin inside a singleton_class). `Class` is strictly better than
+    // `Struct` there because it matches the label the structure phase would
+    // emit for a Ruby `class` — the dominant shape. Ruby modules that fail
+    // to resolve still lose their `Trait` label in the synthesized id, but
+    // they fail to resolve rarely and the tradeoff is documented.
+    const childFallbackLabel: NodeLabel = item.kind === 'trait-impl' ? 'Struct' : 'Class';
     const strct = resolveHeritageId(
       item.className,
       filePath,
       ctx,
-      'Struct',
+      childFallbackLabel,
       `${filePath}:${item.className}`,
     );
     const trait = resolveHeritageId(item.parentName, filePath, ctx, 'Trait');
@@ -339,11 +349,15 @@ export const processHeritageFromExtracted = async (
       h.kind === 'extend' ||
       h.kind === 'prepend'
     ) {
+      // See the per-item call above (processHeritageFromExtractedItem) for
+      // rationale: `Class` is the correct fallback for Ruby mixin kinds,
+      // `Struct` stays the Rust `trait-impl` default.
+      const childFallbackLabel: NodeLabel = h.kind === 'trait-impl' ? 'Struct' : 'Class';
       const strct = resolveHeritageId(
         h.className,
         h.filePath,
         ctx,
-        'Struct',
+        childFallbackLabel,
         `${h.filePath}:${h.className}`,
       );
       const trait = resolveHeritageId(h.parentName, h.filePath, ctx, 'Trait');
