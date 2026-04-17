@@ -14,10 +14,19 @@
  * - `implements-split`: BFS walk, first match wins (Java/C#/Kotlin) — full
  *                       interface-default ambiguity is handled at graph level.
  * - `qualified-syntax`: No auto-resolution (Rust — requires `<T as Trait>::m`).
+ * - `ruby-mixin`:       Kind-aware walk (Ruby). Walks `prepend` parents first
+ *                       (reverse declaration order — last-prepended wins),
+ *                       then the direct owner's own methods, then `extends`
+ *                       and `include` parents (reverse declaration order).
+ *                       This is the only strategy that does NOT do a
+ *                       direct-owner-first short-circuit, because Ruby
+ *                       `prepend` must beat the class's own method of the
+ *                       same name.
  */
 export type MroStrategy =
   | 'first-wins'
   | 'c3'
   | 'leftmost-base'
   | 'implements-split'
-  | 'qualified-syntax';
+  | 'qualified-syntax'
+  | 'ruby-mixin';

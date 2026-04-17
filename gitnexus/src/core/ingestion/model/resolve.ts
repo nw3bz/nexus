@@ -313,7 +313,86 @@ export const lookupMethodByOwnerWithMRO = (
   model: SemanticModel,
   strategy: MroStrategy,
   argCount?: number,
+  /**
+   * Optional pre-computed ancestry list. When provided, overrides the default
+   * per-strategy ancestry source. Primarily used by Ruby singleton dispatch:
+   * the caller supplies `heritageMap.getSingletonAncestry(ownerNodeId)` as
+   * node-id array so this walker resolves against `extend` providers only.
+   *
+   * For `ruby-mixin` strategy, passing an override switches the walker into
+   * a no-prepend-no-self linear scan (the caller has already decided the
+   * order), which is the correct semantics for singleton dispatch.
+   */
+  ancestryOverride?: readonly string[],
 ): SymbolDefinition | undefined => {
+  // ── Ruby mixin strategy ───────────────────────────────────────────
+  //
+  // Kind-aware walk that does NOT short-circuit on the direct owner first.
+  // Ruby MRO for instance dispatch:
+  //   1. Walk `prepend` providers (reverse declaration — last-prepended first)
+  //   2. Direct owner lookup (the class's own methods)
+  //   3. Walk `extends` and `include` providers (reverse declaration)
+  //
+  // For singleton dispatch (`ClassName.foo`), the caller passes
+  // `ancestryOverride = heritageMap.getSingletonAncestry(owner).map(...)`.
+  // The walker then does a simple left-to-right scan of that override and
+  // skips the prepend/direct/extends-include partition.
+  if (strategy === 'ruby-mixin') {
+    if (ancestryOverride) {
+      // Singleton dispatch: scan the pre-computed ancestry only.
+      // argCount still narrows overloaded methods.
+      for (const ancestorId of ancestryOverride) {
+        const method = model.methods.lookupMethodByOwner(ancestorId, methodName, argCount);
+        if (method) return method;
+      }
+      return undefined;
+    }
+
+    // Instance dispatch — kind-aware walk.
+    const instanceEntries = heritageMap.getInstanceAncestry(ownerNodeId);
+    // Partition into prepend parents vs other parents (extends / include /
+    // implements / trait-impl), preserving declaration order within each.
+    const prependParents: string[] = [];
+    const otherParents: string[] = [];
+    for (const e of instanceEntries) {
+      if (e.kind === 'prepend') prependParents.push(e.parentId);
+      else otherParents.push(e.parentId);
+    }
+
+    // 1. Walk prepend parents in REVERSE declaration order (last-prepended wins).
+    for (let i = prependParents.length - 1; i >= 0; i--) {
+      const method = model.methods.lookupMethodByOwner(prependParents[i], methodName, argCount);
+      if (method) return method;
+    }
+
+    // 2. Direct owner lookup (the class's own method).
+    const direct = model.methods.lookupMethodByOwner(ownerNodeId, methodName, argCount);
+    if (direct) return direct;
+
+    // 3. Walk extends + include parents in REVERSE declaration order.
+    //    (Ruby `include A; include B` puts B ahead of A in MRO.)
+    for (let i = otherParents.length - 1; i >= 0; i--) {
+      const method = model.methods.lookupMethodByOwner(otherParents[i], methodName, argCount);
+      if (method) return method;
+    }
+
+    // 4. Transitive ancestors (a mixin that itself mixes in another module).
+    //    Fall back to the BFS ancestor walk for depth > 1. Order is best-effort;
+    //    Ruby's actual MRO for transitive mixins is rare and this under-spec is
+    //    documented in plan 003's Deferred to Separate Tasks.
+    for (const ancestorId of heritageMap.getAncestors(ownerNodeId)) {
+      // Skip direct parents we already walked above.
+      if (prependParents.includes(ancestorId)) continue;
+      if (otherParents.includes(ancestorId)) continue;
+      if (ancestorId === ownerNodeId) continue;
+      const method = model.methods.lookupMethodByOwner(ancestorId, methodName, argCount);
+      if (method) return method;
+    }
+    return undefined;
+  }
+
+  // ── Non-Ruby strategies: direct-owner-first short-circuit ─────────
+
   // Direct lookup first (child override — no walk needed).
   // argCount is threaded through so arity-differing overloads on the direct
   // owner can be disambiguated before the MRO walk starts.
@@ -326,7 +405,9 @@ export const lookupMethodByOwnerWithMRO = (
   // Determine ancestor walk order based on MRO strategy.
   // readonly to accept the cached (frozen) c3 linearization without copying.
   let ancestors: readonly string[];
-  if (strategy === 'c3') {
+  if (ancestryOverride) {
+    ancestors = ancestryOverride;
+  } else if (strategy === 'c3') {
     // C3 linearization (memoized per HeritageMap
     // so repeated calls for the same owner within an ingestion run reuse the
     // linearization instead of rebuilding the parent map and re-running C3).

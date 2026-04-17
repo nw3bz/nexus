@@ -22,6 +22,14 @@
  *     plan 001) makes the test fail with a clear owner-mismatch instead
  *     of passing trivially on `Account`'s own method.
  *
+ * Plan 003 adds the `'ruby-mixin'` MroStrategy and kind-aware ancestry
+ * (prepend / include / extend split). The infrastructure is wired in
+ * `lookupMethodByOwnerWithMRO` and applies whenever Ruby calls flow through
+ * the owner-scoped `resolveMemberCall` path. Shadow-name assertion for
+ * `call_serialize → PrependedOverride#serialize` is TODO-marked below because
+ * Ruby bare-identifier calls inside methods (self-calls) currently take the
+ * `resolveFreeCall` path which doesn't do MRO. See the TODO comment for detail.
+ *
  * Known guard limitation (documented residual): reverting plan 001 Unit 1
  * alone (the sequential prepass extractFromCall) does NOT make these tests
  * fail, because `processCalls` independently extracts call-based heritage
@@ -143,17 +151,24 @@ describe('Ruby mixin heritage: sequential vs worker parity', () => {
   it('sequential mode resolves prepend-only method: call_prepended_marker → PrependedOverride#prepended_marker', () => {
     // `prepended_marker` is defined ONLY on PrependedOverride — not on
     // Account, Greetable, or LoggerMixin. A resolver that fails to enter
-    // the prepend provider into the MRO (i.e., a regression in plan 001
-    // Unit 1's sequential prepass OR Unit 2's module relabel) would not
-    // find this method at all, and the owner list would be empty.
-    //
-    // We deliberately do NOT assert `call_serialize → PrependedOverride#serialize`
-    // here because `Account` also defines `serialize`; kind-aware MRO ordering
-    // (prepend wins over the class's own method) is a separate concern deferred
-    // by plan 001.
+    // the prepend provider into the MRO (regression in plan 001 Unit 1's
+    // sequential prepass OR Unit 2's module relabel) would not find this
+    // method at all, and the owner list would be empty.
     const owners = resolvedMethodOwners(sequential, 'call_prepended_marker', 'prepended_marker');
     expect(owners).toContain('PrependedOverride');
   });
+
+  // TODO(plan-003-followup): assert that prepend shadows self for
+  // `call_serialize → PrependedOverride#serialize`. Blocked on Ruby bare-call
+  // self-inference: bare identifier calls like `serialize` inside `Account#call_serialize`
+  // currently flow through `resolveFreeCall` (global name lookup), not
+  // `resolveMemberCall` (owner-scoped + MRO walk). The `'ruby-mixin'` MroStrategy
+  // added by plan 003 is correctly wired and will apply as soon as Ruby bare calls
+  // are threaded as `self.method` with receiverTypeName = enclosing class. Until then,
+  // shadow-name resolution lands on `Account#serialize` regardless of prepend MRO.
+  //
+  // The `prepended_marker` test above is the narrower guard that works today
+  // (non-shadowed method only reachable via the prepend provider).
 
   it('sequential mode emits IMPLEMENTS edges for all three mixin kinds', () => {
     // Ruby mixins (include / extend / prepend) flow through the IMPLEMENTS

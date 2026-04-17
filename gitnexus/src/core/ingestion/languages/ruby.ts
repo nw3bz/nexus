@@ -158,5 +158,9 @@ export const rubyProvider = defineLanguage({
   classExtractor: createClassExtractor(rubyClassConfig),
   heritageExtractor: createHeritageExtractor(rubyHeritageConfig),
   labelOverride: rubyLabelOverride,
+  // Ruby MRO is kind-aware: prepend providers beat the class's own method,
+  // which in turn beats include providers. See `lookupMethodByOwnerWithMRO`
+  // in `model/resolve.ts` for the walk order.
+  mroStrategy: 'ruby-mixin',
   builtInNames: BUILT_INS,
 });
