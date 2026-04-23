@@ -67,6 +67,7 @@ import { SupportedLanguages } from 'gitnexus-shared';
 export const MIGRATED_LANGUAGES: ReadonlySet<SupportedLanguages> = new Set<SupportedLanguages>([
   SupportedLanguages.Python,
   SupportedLanguages.CSharp,
+  SupportedLanguages.TypeScript,
 ]);
 
 /**

@@ -393,7 +393,21 @@ export function emitReceiverBoundCalls(
 
       // ── Case 4: simple typeBinding (`u: U`) ──────────────────────
       if (typeRef !== undefined && !typeRef.rawName.includes('.')) {
-        const ownerDef = findClassBindingInScope(site.inScope, typeRef.rawName, scopes);
+        let ownerDef = findClassBindingInScope(site.inScope, typeRef.rawName, scopes);
+        // `findClassBindingInScope(..., typeRef.rawName)` only works when
+        // rawName is itself a class symbol. Map for-of tuple bindings
+        // (`__MAP_TUPLE_i__:mapId`), callable aliases (`getUser` → User),
+        // and other compound-friendly shapes need the compound resolver
+        // keyed by the receiver identifier.
+        if (ownerDef === undefined) {
+          ownerDef = resolveCompoundReceiverClass(
+            receiverName,
+            site.inScope,
+            scopes,
+            index,
+            compoundOpts,
+          );
+        }
         if (ownerDef !== undefined) {
           const chain = [ownerDef.nodeId, ...scopes.methodDispatch.mroFor(ownerDef.nodeId)];
           let memberDef: SymbolDefinition | undefined;

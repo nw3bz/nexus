@@ -220,7 +220,7 @@ export function finalize(input: FinalizeInput, hooks: FinalizeHooks): FinalizeOu
         const drafts = edgeIndex.get(filePath)!;
         for (const draft of drafts) {
           if (draft.finalized !== null) continue;
-          const finalized = tryFinalize(draft, byFilePath);
+          const finalized = tryFinalize(draft, byFilePath, edgeIndex);
           if (finalized !== null) {
             draft.finalized = finalized;
             progressed = true;
@@ -386,6 +386,7 @@ function extractExportedName(parsed: ParsedImport): string {
 function tryFinalize(
   draft: ImportEdgeDraft,
   byFilePath: Map<string, FinalizeFile>,
+  edgeIndex: Map<string, ImportEdgeDraft[]>,
 ): ImportEdge | null {
   const targetFile = draft.targetFile;
   if (targetFile === null) return draft.base; // already terminal
@@ -423,20 +424,123 @@ function tryFinalize(
   const importedName = extractExportedName(draft.source);
   const exported = findExportByName(targetModule.localDefs, importedName);
 
-  if (exported === undefined) {
+  if (exported !== undefined) {
+    const transitiveVia =
+      draft.source.kind === 'reexport' ? Object.freeze([targetFile]) : undefined;
+    return {
+      ...draft.base,
+      targetModuleScope: targetModule.moduleScope,
+      targetDefId: exported.nodeId,
+      ...(transitiveVia !== undefined ? { transitiveVia } : {}),
+    };
+  }
+
+  // Multi-hop re-export follow. Barrel modules like
+  //   // models.ts
+  //   export { User } from './base';
+  // emit no local def for `User`; the name surfaces only via their own
+  // `reexport` edge. Consult the target's `reexport` drafts for a
+  // matching `localName === importedName`, prefer the finalized one (its
+  // `targetDefId` is the upstream symbol), and inherit that defId +
+  // chain metadata. Stays O(1) per chain hop by relying on the caller's
+  // fixpoint to settle leaf-first.
+  const followed = followReexportChain(
+    targetModule,
+    importedName,
+    byFilePath,
+    edgeIndex,
+    new Set<string>(),
+  );
+  if (followed === null) {
     // Target resolvable but the name isn't exported — keep trying in case a
     // re-export inside the target's SCC surfaces it in a later iteration.
     return null;
   }
 
-  const transitiveVia = draft.source.kind === 'reexport' ? Object.freeze([targetFile]) : undefined;
+  const viaFiles = [targetFile, ...followed.via];
+  const transitiveVia =
+    draft.source.kind === 'reexport' || viaFiles.length > 1 ? Object.freeze(viaFiles) : undefined;
 
   return {
     ...draft.base,
     targetModuleScope: targetModule.moduleScope,
-    targetDefId: exported.nodeId,
+    targetDefId: followed.def.nodeId,
     ...(transitiveVia !== undefined ? { transitiveVia } : {}),
   };
+}
+
+/**
+ * Chase a name through `reexport` edges in a barrel file.
+ *
+ * At each hop, consult the file's re-export drafts looking for one whose
+ * `localName === name`. If the edge has finalized (has a `targetDefId`
+ * pointing into a leaf file's `localDefs`), return the leaf def. If the
+ * edge is still a draft (leaf not yet processed this iteration), recurse
+ * into its target file. Wildcard re-exports (`export * from './m'`) are
+ * also followed opportunistically — they expand to whatever `name`
+ * resolves to in the wildcard target's localDefs or further reexports.
+ *
+ * Visited-set guards against circular re-export chains
+ * (`a.ts → b.ts → a.ts`), which TypeScript rejects at type-check but
+ * can still appear in parsed input.
+ */
+function followReexportChain(
+  module: FinalizeFile,
+  name: string,
+  byFilePath: Map<string, FinalizeFile>,
+  edgeIndex: Map<string, ImportEdgeDraft[]>,
+  visited: Set<string>,
+): { def: SymbolDefinition; via: readonly string[] } | null {
+  if (visited.has(module.filePath)) return null;
+  visited.add(module.filePath);
+
+  const drafts = edgeIndex.get(module.filePath);
+  if (drafts === undefined) return null;
+
+  // Named re-exports first (more specific).
+  for (const draft of drafts) {
+    if (draft.source.kind !== 'reexport') continue;
+    if (draft.source.localName !== name) continue;
+    const nextTargetFile = draft.targetFile;
+    if (nextTargetFile === null) continue;
+    const nextModule = byFilePath.get(nextTargetFile);
+    if (nextModule === undefined) continue;
+
+    const importedName = draft.source.importedName;
+    const exported = findExportByName(nextModule.localDefs, importedName);
+    if (exported !== undefined) {
+      return { def: exported, via: [nextTargetFile] };
+    }
+
+    // Recurse — the barrel's upstream is itself a barrel.
+    const deeper = followReexportChain(nextModule, importedName, byFilePath, edgeIndex, visited);
+    if (deeper !== null) {
+      return { def: deeper.def, via: [nextTargetFile, ...deeper.via] };
+    }
+  }
+
+  // Wildcard re-exports (`export * from './m'`) — fan out and keep the
+  // first match. `source.kind === 'wildcard'` here because the
+  // decomposer classifies `export * from ...` as `reexport-wildcard` →
+  // `wildcard` (see TypeScript import-decomposer).
+  for (const draft of drafts) {
+    if (draft.source.kind !== 'wildcard') continue;
+    const nextTargetFile = draft.targetFile;
+    if (nextTargetFile === null) continue;
+    const nextModule = byFilePath.get(nextTargetFile);
+    if (nextModule === undefined) continue;
+
+    const exported = findExportByName(nextModule.localDefs, name);
+    if (exported !== undefined) {
+      return { def: exported, via: [nextTargetFile] };
+    }
+    const deeper = followReexportChain(nextModule, name, byFilePath, edgeIndex, visited);
+    if (deeper !== null) {
+      return { def: deeper.def, via: [nextTargetFile, ...deeper.via] };
+    }
+  }
+
+  return null;
 }
 
 /**
