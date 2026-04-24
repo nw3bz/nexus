@@ -45,20 +45,28 @@ export interface FinalizeFile {
   /**
    * Defs exported from this file — the "what other files can import by name"
    * surface. Typically those with `isExported: true` (the module's own
-   * declarations) plus, for multi-hop re-export chains, the re-exported
-   * names the parser chose to surface here.
+   * declarations); parsers MAY also surface re-exported names here as a
+   * shortcut, but it is no longer required for correctness.
    *
    * **Multi-hop re-export contract.** `finalize` resolves an edge
-   * `A → B (importedName: 'X')` by looking up `X` in `B.localDefs`. If B
-   * only has `export { X } from './C'` and the parser *does not* include
-   * `X` in `B.localDefs`, A's edge hits the fixpoint cap and is marked
-   * `linkStatus: 'unresolved'`. The fixpoint does NOT mutate `localDefs`
-   * across iterations — it is static input.
+   * `A → B (importedName: 'X')` by first looking up `X` in `B.localDefs`.
+   * If `B` only has `export { X } from './C'` and does NOT surface `X` in
+   * its own `localDefs`, `finalize` falls back to `followReexportChain`,
+   * which traverses `B`'s `reexport` (and `wildcard` re-export) drafts
+   * to locate `X` in a downstream module's `localDefs`. The chain is
+   * cycle-guarded via a per-call visited set and inherits the
+   * upstream `targetDefId`, populating `transitiveVia` with the visited
+   * file path(s).
    *
-   * Parsers that want multi-hop re-export chains to settle end-to-end must
-   * include re-exported names in the intermediate file's `localDefs` (with
-   * the original `DefId` of the source symbol). This keeps the algorithm
-   * O(1) per lookup and avoids graph-crawl during finalize.
+   * Surfacing re-exported names in `localDefs` is still a valid (and
+   * slightly cheaper) optimization: the direct lookup short-circuits the
+   * recursive crawl. Parsers SHOULD prefer surfacing names they can resolve
+   * statically (e.g., `export { X } from './c'` when `c.ts` is parsed in
+   * the same workspace), and rely on `followReexportChain` for the long
+   * tail of barrel patterns.
+   *
+   * The fixpoint does NOT mutate `localDefs` across iterations — it is
+   * static input.
    */
   readonly localDefs: readonly SymbolDefinition[];
 }

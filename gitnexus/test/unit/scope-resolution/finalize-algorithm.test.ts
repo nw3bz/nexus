@@ -299,19 +299,23 @@ describe('finalize', () => {
       expect(reexportEdge.transitiveVia).toEqual(['c']);
     });
 
-    it('multi-hop re-export chains only resolve when intermediate files include the name in localDefs', () => {
-      // Contract (see FinalizeFile.localDefs doc): `finalize` looks up
-      // `importedName` in `B.localDefs`. If B re-exports X from C but does
-      // NOT include X in its own localDefs, A's import of X from B cannot
-      // resolve — the fixpoint doesn't mutate localDefs across iterations.
+    it('multi-hop re-export chains resolve via followReexportChain even when intermediate files do not surface the name', () => {
+      // Contract (see FinalizeFile.localDefs doc): `finalize` first looks
+      // up `importedName` in `B.localDefs`. If B only has
+      //   export { X } from './C'
+      // and does NOT surface X in its own localDefs, finalize falls back
+      // to `followReexportChain`, which crawls B's reexport drafts to
+      // locate X in a downstream module's localDefs and inherits the leaf
+      // `targetDefId`. The visited set guards against import cycles.
       //
-      // This test documents the current behavior: parsers that want
-      // multi-hop chains to settle end-to-end must surface re-exported
-      // names in the intermediate file's localDefs (with the original
-      // source DefId).
+      // The "thin" variant (B does not surface X) resolves to C's def
+      // via the re-export chain. The "thick" variant (B has its own X
+      // local def) short-circuits to B's local def — surfacing the name
+      // is a valid optimization that bypasses the recursive crawl, but
+      // it can also intentionally shadow the re-export.
       const c = file('c', [def('def:c.X', 'Class', 'c.X')]);
-      // Variant 1: B does NOT include X in its own localDefs → A's import
-      // fails.
+
+      // Variant 1: B does NOT include X in its own localDefs.
       const bThin = file('b', [], [reexport('X', 'X', 'c')]);
       const aThin = file('a', [], [named('X', 'X', 'b')]);
       const thinFiles = [aThin, bThin, c];
@@ -319,22 +323,92 @@ describe('finalize', () => {
         { files: thinFiles, workspaceIndex: undefined },
         defaultHooks(thinFiles),
       );
-      expect(firstImport(thinOut, aThin.moduleScope)!.linkStatus).toBe('unresolved');
+      const thinEdge = firstImport(thinOut, aThin.moduleScope)!;
+      expect(thinEdge.linkStatus).toBeUndefined();
+      expect(thinEdge.targetDefId).toBe('def:c.X');
+      // `transitiveVia` records the chain: through B (target) into C (leaf).
+      expect(thinEdge.transitiveVia).toEqual(['b', 'c']);
 
-      // Variant 2: B includes X in its localDefs (re-exports surfaced) → A resolves.
-      const bThick = file(
-        'b',
-        [def('def:c.X', 'Class', 'b.X')], // B surfaces X with its own qname
-        [reexport('X', 'X', 'c')],
-      );
+      // Variant 2: B surfaces X via its OWN localDefs (distinct nodeId
+      // from C's X) → direct B.localDefs lookup short-circuits the
+      // recursive re-export crawl. This is the "shadowing" optimization:
+      // when B explicitly surfaces a name, importers see B's def, not
+      // the upstream one. `transitiveVia` is undefined since no chain
+      // walk happened.
+      const bThick = file('b', [def('def:b.X', 'Class', 'b.X')], [reexport('X', 'X', 'c')]);
       const aThick = file('a', [], [named('X', 'X', 'b')]);
       const thickFiles = [aThick, bThick, c];
       const thickOut = finalize(
         { files: thickFiles, workspaceIndex: undefined },
         defaultHooks(thickFiles),
       );
-      expect(firstImport(thickOut, aThick.moduleScope)!.linkStatus).toBeUndefined();
-      expect(firstImport(thickOut, aThick.moduleScope)!.targetDefId).toBe('def:c.X');
+      const thickEdge = firstImport(thickOut, aThick.moduleScope)!;
+      expect(thickEdge.linkStatus).toBeUndefined();
+      expect(thickEdge.targetDefId).toBe('def:b.X');
+      expect(thickEdge.transitiveVia).toBeUndefined();
+    });
+
+    it('resolves a 3-hop re-export chain (a → b → c → d) where intermediates do not surface the name', () => {
+      const d = file('d', [def('def:d.X', 'Class', 'd.X')]);
+      const c = file('c', [], [reexport('X', 'X', 'd')]);
+      const b = file('b', [], [reexport('X', 'X', 'c')]);
+      const a = file('a', [], [named('X', 'X', 'b')]);
+      const files = [a, b, c, d];
+      const out = finalize({ files, workspaceIndex: undefined }, defaultHooks(files));
+      const edge = firstImport(out, a.moduleScope)!;
+      expect(edge.linkStatus).toBeUndefined();
+      expect(edge.targetDefId).toBe('def:d.X');
+      expect(edge.transitiveVia).toEqual(['b', 'c', 'd']);
+    });
+
+    it('terminates without infinite recursion when re-exports cycle back through the chain', () => {
+      // Cycle: b re-exports from c, c re-exports from b. Neither surfaces
+      // X. `followReexportChain`'s visited set prevents infinite recursion;
+      // the edge resolves as unresolved (no terminal localDef found) but
+      // the call must return.
+      const c = file('c', [], [reexport('X', 'X', 'b')]);
+      const b = file('b', [], [reexport('X', 'X', 'c')]);
+      const a = file('a', [], [named('X', 'X', 'b')]);
+      const files = [a, b, c];
+      const out = finalize({ files, workspaceIndex: undefined }, defaultHooks(files));
+      const edge = firstImport(out, a.moduleScope)!;
+      // Cycle exhausts the chain crawl → unresolved name (file is known).
+      expect(edge.targetFile).toBe('b');
+      expect(edge.linkStatus).toBe('unresolved');
+      expect(edge.targetDefId).toBeUndefined();
+    });
+
+    it('falls through wildcard re-exports when followReexportChain crawls', () => {
+      // B has `export * from './c'` (wildcard re-export). A imports `X`
+      // from B. `followReexportChain` should fall through the wildcard to
+      // find X in C.localDefs.
+      const c = file('c', [def('def:c.X', 'Class', 'c.X')]);
+      const b = file('b', [], [wildcard('c')]);
+      const a = file('a', [], [named('X', 'X', 'b')]);
+      const files = [a, b, c];
+      const out = finalize({ files, workspaceIndex: undefined }, defaultHooks(files));
+      const edge = firstImport(out, a.moduleScope)!;
+      expect(edge.linkStatus).toBeUndefined();
+      expect(edge.targetDefId).toBe('def:c.X');
+    });
+
+    it('first-match-wins when followReexportChain encounters multiple sources for the same name', () => {
+      // B re-exports X from BOTH c and d. `followReexportChain` walks
+      // re-exports in declaration order; the first one that resolves wins.
+      // Resolution must be deterministic (no flaky picks).
+      const c = file('c', [def('def:c.X', 'Class', 'c.X')]);
+      const d = file('d', [def('def:d.X', 'Class', 'd.X')]);
+      const b = file('b', [], [reexport('X', 'X', 'c'), reexport('X', 'X', 'd')]);
+      const a = file('a', [], [named('X', 'X', 'b')]);
+      const files = [a, b, c, d];
+      const out = finalize({ files, workspaceIndex: undefined }, defaultHooks(files));
+      const edge = firstImport(out, a.moduleScope)!;
+      expect(edge.linkStatus).toBeUndefined();
+      // First re-export draft (`from 'c'`) wins. Recording this as the
+      // contract — if the algorithm changes to last-wins or merge, this
+      // test must be updated alongside the multi-binding propagation
+      // pass that mirrors typeBindings (which also uses first-wins).
+      expect(edge.targetDefId).toBe('def:c.X');
     });
   });
 
