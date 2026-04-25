@@ -62,6 +62,14 @@ const CALL_TAGS = [
   '@reference.call.constructor',
 ] as const;
 
+function pickFirstDefined(grouped: CaptureMatch, tags: readonly string[]): Capture | undefined {
+  for (const tag of tags) {
+    const cap = grouped[tag];
+    if (cap !== undefined) return cap;
+  }
+  return undefined;
+}
+
 /**
  * Drop `@reference.read.member` matches whose underlying `member_expression`
  * is NOT actually a read context:
@@ -189,10 +197,9 @@ export function emitTsScopeCaptures(
     // overloads — TypeScript supports overload signatures via
     // function_signature, so `parameterTypes` is populated when
     // available.
-    const declTag = FUNCTION_DECL_TAGS.find((t) => grouped[t] !== undefined);
-    if (declTag !== undefined) {
-      const anchor = grouped[declTag]!;
-      const fnNode = findFunctionNode(tree.rootNode, anchor.range);
+    const declAnchor = pickFirstDefined(grouped, FUNCTION_DECL_TAGS);
+    if (declAnchor !== undefined) {
+      const fnNode = findFunctionNode(tree.rootNode, declAnchor.range);
       if (fnNode !== null) {
         const arity = computeTsArityMetadata(fnNode);
         if (arity.parameterCount !== undefined) {
@@ -223,25 +230,26 @@ export function emitTsScopeCaptures(
     // arity filter can narrow overloads. Count the `argument` named
     // children of the backing `arguments` node. TypeScript constructor
     // calls use `new_expression`; regular calls use `call_expression`.
-    const callTag = CALL_TAGS.find((t) => grouped[t] !== undefined);
-    if (callTag !== undefined && grouped['@reference.arity'] === undefined) {
-      const anchor = grouped[callTag]!;
+    const callAnchor = pickFirstDefined(grouped, CALL_TAGS);
+    if (callAnchor !== undefined && grouped['@reference.arity'] === undefined) {
       const callNode =
-        findNodeAtRange(tree.rootNode, anchor.range, 'call_expression') ??
-        findNodeAtRange(tree.rootNode, anchor.range, 'new_expression');
+        findNodeAtRange(tree.rootNode, callAnchor.range, 'call_expression') ??
+        findNodeAtRange(tree.rootNode, callAnchor.range, 'new_expression');
       if (callNode !== null) {
         const argList = callNode.childForFieldName('arguments');
-        const args =
+        const args: SyntaxNode[] =
           argList === null
             ? []
-            : argList.namedChildren.filter((c) => c !== null && c.type !== 'comment');
+            : argList.namedChildren.filter(
+                (c): c is SyntaxNode => c !== null && c.type !== 'comment',
+              );
         grouped['@reference.arity'] = syntheticCapture(
           '@reference.arity',
           callNode,
           String(args.length),
         );
 
-        const argTypes = args.map((arg) => inferArgType(arg!));
+        const argTypes = args.map((arg) => inferArgType(arg));
         grouped['@reference.parameter-types'] = syntheticCapture(
           '@reference.parameter-types',
           callNode,
@@ -258,9 +266,9 @@ export function emitTsScopeCaptures(
     // signature, arrow/function-expression assigned to a class field).
     // Arrow functions nested inside method bodies rely on scope-chain
     // lookup instead of synthesis — covered by `tsReceiverBinding`.
-    if (grouped['@scope.function'] !== undefined) {
-      const anchor = grouped['@scope.function']!;
-      const fnNode = findFunctionNode(tree.rootNode, anchor.range);
+    const scopeFnAnchor = grouped['@scope.function'];
+    if (scopeFnAnchor !== undefined) {
+      const fnNode = findFunctionNode(tree.rootNode, scopeFnAnchor.range);
       if (fnNode !== null) {
         const synth = synthesizeTsReceiverBinding(fnNode);
         if (synth !== null) out.push(synth);
@@ -301,8 +309,9 @@ export function emitTsScopeCaptures(
  */
 function synthesizeDestructuringBindings(root: SyntaxNode, out: CaptureMatch[]): void {
   const stack: SyntaxNode[] = [root];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
+  for (;;) {
+    const node = stack.pop();
+    if (node === undefined) break;
     for (const child of node.namedChildren) {
       if (child !== null) stack.push(child);
     }
@@ -364,8 +373,9 @@ function synthesizeDestructuringBindings(root: SyntaxNode, out: CaptureMatch[]):
  */
 function synthesizeForOfMapTupleBindings(root: SyntaxNode, out: CaptureMatch[]): void {
   const stack: SyntaxNode[] = [root];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
+  for (;;) {
+    const node = stack.pop();
+    if (node === undefined) break;
     for (const child of node.namedChildren) {
       if (child !== null) stack.push(child);
     }
@@ -412,8 +422,9 @@ function synthesizeForOfMapTupleBindings(root: SyntaxNode, out: CaptureMatch[]):
  */
 function synthesizeInstanceofNarrowings(root: SyntaxNode, out: CaptureMatch[]): void {
   const stack: SyntaxNode[] = [root];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
+  for (;;) {
+    const node = stack.pop();
+    if (node === undefined) break;
     for (const child of node.namedChildren) {
       if (child !== null) stack.push(child);
     }

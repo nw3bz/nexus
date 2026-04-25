@@ -45,28 +45,34 @@ interface TypescriptResolutionConfig {
  * total work for what should be O(N_files + N_imports).
  */
 function makeTsResolveImportTarget(): ScopeResolver['resolveImportTarget'] {
-  let cachedAllFilePaths: ReadonlySet<string> | null = null;
-  let cachedSet: Set<string> | null = null;
-  let cachedAllFileList: readonly string[] | null = null;
-  let cachedNormalizedFileList: readonly string[] | null = null;
-  let cachedResolveCache: Map<string, string | null> | null = null;
+  interface PassCache {
+    readonly key: ReadonlySet<string>;
+    readonly allFilePaths: Set<string>;
+    readonly allFileList: readonly string[];
+    readonly normalizedFileList: readonly string[];
+    readonly resolveCache: Map<string, string | null>;
+  }
+  let cached: PassCache | null = null;
 
   return (targetRaw, fromFile, allFilePaths, resolutionConfig) => {
-    if (cachedAllFilePaths !== allFilePaths) {
-      cachedAllFilePaths = allFilePaths;
-      cachedSet = new Set(allFilePaths);
-      cachedAllFileList = Array.from(allFilePaths);
-      cachedNormalizedFileList = cachedAllFileList.map((f) => f.toLowerCase());
-      cachedResolveCache = new Map();
+    if (cached === null || cached.key !== allFilePaths) {
+      const allFileList = Array.from(allFilePaths);
+      cached = {
+        key: allFilePaths,
+        allFilePaths: new Set(allFilePaths),
+        allFileList,
+        normalizedFileList: allFileList.map((f) => f.toLowerCase()),
+        resolveCache: new Map(),
+      };
     }
 
     const cfg = resolutionConfig as TypescriptResolutionConfig | undefined;
     const ws: TsResolveContext = {
       fromFile,
-      allFilePaths: cachedSet!,
-      allFileList: cachedAllFileList!,
-      normalizedFileList: cachedNormalizedFileList!,
-      resolveCache: cachedResolveCache!,
+      allFilePaths: cached.allFilePaths,
+      allFileList: cached.allFileList,
+      normalizedFileList: cached.normalizedFileList,
+      resolveCache: cached.resolveCache,
       tsconfigPaths: cfg?.tsconfigPaths ?? null,
     };
     return resolveTsTarget(targetRaw, ws);

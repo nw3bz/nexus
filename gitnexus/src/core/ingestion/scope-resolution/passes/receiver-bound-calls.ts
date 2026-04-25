@@ -335,12 +335,11 @@ export function emitReceiverBoundCalls(
       }
 
       // ── Case 3b: chain-typebinding (`city → user.get_city`) ──────
-      if (
-        typeRef !== undefined &&
-        typeRef.rawName.includes('.') &&
-        !typeRef.rawName.includes('(') &&
-        !namespaceTargets.has(typeRef.rawName.split('.')[0]!)
-      ) {
+      const chainHead =
+        typeRef !== undefined && typeRef.rawName.includes('.') && !typeRef.rawName.includes('(')
+          ? (typeRef.rawName.split('.', 1)[0] ?? '')
+          : undefined;
+      if (typeRef !== undefined && chainHead !== undefined && !namespaceTargets.has(chainHead)) {
         // Try the plain dotted-field walk first — covers property /
         // collection-accessor shapes (`.Values`, Kotlin `.size`) and
         // field chains. Fall back to call-form (`x()`) which treats

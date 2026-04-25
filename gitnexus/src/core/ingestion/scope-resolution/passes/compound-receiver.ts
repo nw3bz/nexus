@@ -34,6 +34,16 @@ import {
  *  pathological recursion if the receiver text is malformed. */
 const COMPOUND_RECEIVER_MAX_DEPTH = 4;
 
+const MAP_TUPLE_SENTINEL_RE = /^__MAP_TUPLE_(\d+)__:(.+)$/;
+
+function parseMapTupleSentinel(text: string): { tupleIdx: number; rhs: string } | null {
+  const match = MAP_TUPLE_SENTINEL_RE.exec(text);
+  if (match === null) return null;
+  const [, idxStr, rhs] = match;
+  if (idxStr === undefined || rhs === undefined) return null;
+  return { tupleIdx: Number(idxStr), rhs };
+}
+
 interface ResolveCompoundReceiverOptions {
   /** When true (default), if method lookup fails on the receiver's
    *  class, walk its fields and try the lookup on each field's class.
@@ -73,13 +83,11 @@ export function resolveCompoundReceiverClass(
   // "static receiver" shapes like `UserService.findUser()` where
   // `UserService` isn't a variable but a class imported into scope.
   if (!text.includes('.') && !text.includes('(')) {
-    const mapTuple = /^__MAP_TUPLE_(\d+)__:(.+)$/.exec(text);
+    const mapTuple = parseMapTupleSentinel(text);
     if (mapTuple !== null) {
-      const tupleIdx = Number(mapTuple[1]);
-      const rhs = mapTuple[2]!;
-      const rhsTb = findReceiverTypeBinding(inScope, rhs, scopes);
+      const rhsTb = findReceiverTypeBinding(inScope, mapTuple.rhs, scopes);
       if (rhsTb === undefined) return undefined;
-      const arg = extractShallowMapTypeArgByIndex(rhsTb.rawName, tupleIdx);
+      const arg = extractShallowMapTypeArgByIndex(rhsTb.rawName, mapTuple.tupleIdx);
       if (arg === undefined) return undefined;
       return findClassBindingInScope(rhsTb.declaredAtScope, arg, scopes);
     }
@@ -89,13 +97,11 @@ export function resolveCompoundReceiverClass(
       // Map for-of: binding name is `user` but rawType is
       // `__MAP_TUPLE_i__:entries` (see captures.ts) — same extraction as
       // the literal-sentinel branch above.
-      const boundMapTuple = /^__MAP_TUPLE_(\d+)__:(.+)$/.exec(tb.rawName);
+      const boundMapTuple = parseMapTupleSentinel(tb.rawName);
       if (boundMapTuple !== null) {
-        const tupleIdx = Number(boundMapTuple[1]);
-        const rhs = boundMapTuple[2]!;
-        const rhsTb = findReceiverTypeBinding(inScope, rhs, scopes);
+        const rhsTb = findReceiverTypeBinding(inScope, boundMapTuple.rhs, scopes);
         if (rhsTb === undefined) return undefined;
-        const arg = extractShallowMapTypeArgByIndex(rhsTb.rawName, tupleIdx);
+        const arg = extractShallowMapTypeArgByIndex(rhsTb.rawName, boundMapTuple.tupleIdx);
         if (arg === undefined) return undefined;
         return findClassBindingInScope(rhsTb.declaredAtScope, arg, scopes);
       }
@@ -266,7 +272,9 @@ export function resolveCompoundReceiverClass(
   // the element class directly. Resolved before the field-walk
   // because Dictionary-family types aren't local class defs.
   if (options.unwrapCollectionAccessor !== undefined && parts.length >= 2) {
-    const last = parts[parts.length - 1]!;
+    const last = parts[parts.length - 1];
+    const headInner = parts[0];
+    if (last === undefined || headInner === undefined) return undefined;
     const prefix = parts.slice(0, -1).join('.');
     let prefixType: TypeRef | undefined;
     if (parts.length === 2) {
@@ -276,16 +284,17 @@ export function resolveCompoundReceiverClass(
       // to find its typeRef. We need the TypeRef (not the class def)
       // because the hook inspects the raw generic args (e.g.
       // `Dictionary<string, User>`).
-      const headInner = parts[0]!;
       let cur = findReceiverTypeBinding(inScope, headInner, scopes);
       for (let i = 1; i < parts.length - 1 && cur !== undefined; i++) {
+        const segment = parts[i];
+        if (segment === undefined) break;
         const cls = findClassBindingInScope(cur.declaredAtScope, cur.rawName, scopes);
         if (cls === undefined) {
           cur = undefined;
           break;
         }
         const cs = classScopeByDefId.get(cls.nodeId);
-        cur = cs?.typeBindings.get(parts[i]!);
+        cur = cs?.typeBindings.get(segment);
       }
       prefixType = cur;
     }
@@ -297,7 +306,8 @@ export function resolveCompoundReceiverClass(
     }
   }
 
-  const head = parts[0]!;
+  const head = parts[0];
+  if (head === undefined) return undefined;
   const headMemberName = stripCallParens(head);
   const headType = findReceiverTypeBinding(inScope, headMemberName, scopes);
   let currentClass: SymbolDefinition | undefined = headType
@@ -323,7 +333,8 @@ export function resolveCompoundReceiverClass(
     );
   }
   for (let i = 1; i < parts.length && currentClass !== undefined; i++) {
-    const segment = parts[i]!;
+    const segment = parts[i];
+    if (segment === undefined) break;
     const memberName = stripCallParens(segment);
     const cs = classScopeByDefId.get(currentClass.nodeId);
     let memberType = cs?.typeBindings.get(memberName);
@@ -478,8 +489,9 @@ function resolveMapValueTypeNameFromPrefix(
 ): string | undefined {
   const classScopeByDefId = index.classScopeByDefId;
   const parts = splitChainAtTopLevel(objExpr);
-  if (parts.length === 0) return undefined;
-  const headMemberName = stripCallParens(parts[0]!);
+  const head = parts[0];
+  if (head === undefined) return undefined;
+  const headMemberName = stripCallParens(head);
   const headType = findReceiverTypeBinding(inScope, headMemberName, scopes);
   let currentClass: SymbolDefinition | undefined = headType
     ? findClassBindingInScope(headType.declaredAtScope, headType.rawName, scopes)
@@ -501,7 +513,9 @@ function resolveMapValueTypeNameFromPrefix(
   }
   let lastMemberType: TypeRef | undefined;
   for (let i = 1; i < parts.length && currentClass !== undefined; i++) {
-    const memberName = stripCallParens(parts[i]!);
+    const segment = parts[i];
+    if (segment === undefined) break;
+    const memberName = stripCallParens(segment);
     const cs = classScopeByDefId.get(currentClass.nodeId);
     if (cs === undefined) return undefined;
     let memberType = cs.typeBindings.get(memberName);
