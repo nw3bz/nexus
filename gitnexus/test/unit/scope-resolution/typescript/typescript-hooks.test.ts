@@ -18,6 +18,7 @@ import {
 } from '../../../../src/core/ingestion/languages/typescript/simple-hooks.js';
 import { synthesizeTsReceiverBinding } from '../../../../src/core/ingestion/languages/typescript/receiver-binding.js';
 import { typescriptMergeBindings } from '../../../../src/core/ingestion/languages/typescript/merge-bindings.js';
+import { typescriptProvider } from '../../../../src/core/ingestion/languages/typescript.js';
 import { typescriptArityCompatibility } from '../../../../src/core/ingestion/languages/typescript/arity.js';
 import { computeTsArityMetadata } from '../../../../src/core/ingestion/languages/typescript/arity-metadata.js';
 import { getTsParser } from '../../../../src/core/ingestion/languages/typescript/query.js';
@@ -515,6 +516,27 @@ describe('typescriptMergeBindings — declaration merging (multi-space)', () => 
     const local = binding('local', 'L', 'Route');
     const imp = binding('import', 'I', 'Route');
     expect(typescriptMergeBindings([local, imp])).toEqual([local]);
+  });
+});
+
+describe('typescriptProvider.mergeBindings adapter', () => {
+  const binding = (origin: BindingRef['origin'], nodeId: string, type: NodeLabel): BindingRef =>
+    ({
+      origin,
+      def: { nodeId, type },
+    }) as BindingRef;
+
+  it('is scope-id independent because finalize calls it per (scope, name)', () => {
+    const merge = typescriptProvider.mergeBindings;
+    if (merge === undefined) throw new Error('typescriptProvider.mergeBindings missing');
+
+    const importBinding = binding('import', 'I', 'Class');
+    const localBinding = binding('local', 'L', 'Class');
+    const scopeA = fakeScope({ kind: 'Module', id: 'module-a' as ScopeId });
+    const scopeB = fakeScope({ kind: 'Module', id: 'module-b' as ScopeId });
+
+    expect(merge(scopeA, [importBinding, localBinding])).toEqual([localBinding]);
+    expect(merge(scopeB, [importBinding, localBinding])).toEqual([localBinding]);
   });
 });
 

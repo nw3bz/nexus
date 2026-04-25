@@ -76,6 +76,9 @@
  *   9. **Intersection types on parameters** (`(a: A & B)`) — treated
  *      as opaque (no strip); overload narrowing on intersections
  *      won't match.
+ *  10. **`instanceof` member-expression narrowing** — only bare
+ *      identifiers are narrowed (`user instanceof User`). Member paths
+ *      such as `user.address instanceof Address` remain unresolved.
  *
  * Shadow-harness corpus parity on `test/integration/resolvers/
  * typescript.test.ts` is the authoritative signal for which of these

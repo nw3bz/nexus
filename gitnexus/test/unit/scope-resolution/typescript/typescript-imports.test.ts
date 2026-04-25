@@ -8,11 +8,13 @@
 
 import { describe, it, expect } from 'vitest';
 import { emitTsScopeCaptures } from '../../../../src/core/ingestion/languages/typescript/captures.js';
+import { splitImportStatement } from '../../../../src/core/ingestion/languages/typescript/import-decomposer.js';
 import { interpretTsImport } from '../../../../src/core/ingestion/languages/typescript/interpret.js';
 import {
   resolveTsImportTarget,
   type TsResolveContext,
 } from '../../../../src/core/ingestion/languages/typescript/import-target.js';
+import type { SyntaxNode } from '../../../../src/core/ingestion/utils/ast-helpers.js';
 import type { ParsedImport, WorkspaceIndex } from 'gitnexus-shared';
 import { SupportedLanguages } from 'gitnexus-shared';
 
@@ -22,6 +24,27 @@ function importsFor(src: string): ParsedImport[] {
     .filter((m) => m['@import.statement'] !== undefined)
     .map((m) => interpretTsImport(m))
     .filter((p): p is ParsedImport => p !== null);
+}
+
+function mockNode(
+  type: string,
+  text: string,
+  fields: Record<string, SyntaxNode | null> = {},
+  children: readonly SyntaxNode[] = [],
+  startIndex = 0,
+): SyntaxNode {
+  return {
+    type,
+    text,
+    startIndex,
+    startPosition: { row: 0, column: startIndex },
+    endPosition: { row: 0, column: startIndex + text.length },
+    get namedChildCount() {
+      return children.length;
+    },
+    namedChild: (index: number) => children[index] ?? null,
+    childForFieldName: (name: string) => fields[name] ?? null,
+  } as unknown as SyntaxNode;
 }
 
 describe('interpretTsImport — static imports', () => {
@@ -131,6 +154,22 @@ describe('interpretTsImport — static imports', () => {
     });
   });
 
+  it('fails closed when an import specifier is missing its `name` field', () => {
+    const source = mockNode('string', '"./m"');
+    const alias = mockNode('identifier', 'Alias', {}, [], 12);
+    const spec = mockNode('import_specifier', 'Missing as Alias', { alias }, [alias]);
+    const named = mockNode('named_imports', '{ Missing as Alias }', {}, [spec]);
+    const clause = mockNode('import_clause', '{ Missing as Alias }', {}, [named]);
+    const stmt = mockNode(
+      'import_statement',
+      'import { Missing as Alias } from "./m";',
+      { source },
+      [clause, source],
+    );
+
+    expect(splitImportStatement(stmt)).toHaveLength(0);
+  });
+
   it('preserves the module path as written (no quote stripping leftovers)', () => {
     const [imp] = importsFor("import X from '@scope/pkg';");
     expect(imp?.targetRaw).toBe('@scope/pkg');
@@ -187,6 +226,21 @@ describe('interpretTsImport — re-exports', () => {
   it('local `export { X }` (no `from`) is not an import', () => {
     const imps = importsFor('const X = 1; export { X };');
     expect(imps).toHaveLength(0);
+  });
+
+  it('fails closed when a re-export specifier is missing its `name` field', () => {
+    const source = mockNode('string', '"./m"');
+    const alias = mockNode('identifier', 'Alias', {}, [], 12);
+    const spec = mockNode('export_specifier', 'Missing as Alias', { alias }, [alias]);
+    const clause = mockNode('export_clause', '{ Missing as Alias }', {}, [spec]);
+    const stmt = mockNode(
+      'export_statement',
+      'export { Missing as Alias } from "./m";',
+      { source },
+      [clause, source],
+    );
+
+    expect(splitImportStatement(stmt)).toHaveLength(0);
   });
 });
 

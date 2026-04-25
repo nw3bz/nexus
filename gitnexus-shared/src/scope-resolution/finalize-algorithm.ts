@@ -194,7 +194,8 @@ export function finalize(input: FinalizeInput, hooks: FinalizeHooks): FinalizeOu
     graph.set(file.filePath, new Set());
   }
   for (const [fromFile, drafts] of edgeIndex) {
-    const edges = graph.get(fromFile)!;
+    const edges = graph.get(fromFile);
+    if (edges === undefined) continue;
     for (const d of drafts) {
       if (d.targetFile !== null && byFilePath.has(d.targetFile)) {
         edges.add(d.targetFile);
@@ -231,7 +232,8 @@ export function finalize(input: FinalizeInput, hooks: FinalizeHooks): FinalizeOu
       progressed = false;
       iterations++;
       for (const filePath of scc.files) {
-        const drafts = edgeIndex.get(filePath)!;
+        const drafts = edgeIndex.get(filePath);
+        if (drafts === undefined) continue;
         for (const draft of drafts) {
           if (draft.finalized !== null) continue;
           const finalized = tryFinalize(draft, byFilePath, reexportClosures);
@@ -245,7 +247,8 @@ export function finalize(input: FinalizeInput, hooks: FinalizeHooks): FinalizeOu
 
     // Any drafts still not finalized within this SCC hit the cap → unresolved.
     for (const filePath of scc.files) {
-      const drafts = edgeIndex.get(filePath)!;
+      const drafts = edgeIndex.get(filePath);
+      if (drafts === undefined) continue;
       for (const draft of drafts) {
         if (draft.finalized !== null) continue;
         draft.finalized = {
@@ -259,10 +262,14 @@ export function finalize(input: FinalizeInput, hooks: FinalizeHooks): FinalizeOu
   // ── Phase 4: collect finalized `ImportEdge[]` per module scope, preserving
   // input order within each file, and wildcard-expand where applicable.
   for (const file of input.files) {
-    const drafts = edgeIndex.get(file.filePath)!;
+    const drafts = edgeIndex.get(file.filePath);
+    if (drafts === undefined) continue;
     const finalized: ImportEdge[] = [];
     for (const d of drafts) {
-      const edge = d.finalized!;
+      const edge = d.finalized;
+      if (edge === null) {
+        throw new Error(`Invariant violated: import edge was not finalized for ${file.filePath}`);
+      }
       if (d.source.kind === 'wildcard' && edge.linkStatus !== 'unresolved') {
         // Produce one `wildcard-expanded` ImportEdge per exported name.
         const expanded = expandWildcard(edge, byFilePath, hooks, input.workspaceIndex);
@@ -581,7 +588,10 @@ function buildReexportClosures(
   // singletons settle in one pass; cyclic SCCs run a bounded fixpoint.
   for (const scc of subSccs) {
     if (!scc.isCycle) {
-      populateFileClosure(scc.files[0]!, byFilePath, edgeIndex, closures);
+      const filePath = scc.files[0];
+      if (filePath !== undefined) {
+        populateFileClosure(filePath, byFilePath, edgeIndex, closures);
+      }
       continue;
     }
     // Cap = |SCC| + 1. With first-wins precedence each name needs at
@@ -624,7 +634,8 @@ function populateFileClosure(
   edgeIndex: ReadonlyMap<string, ImportEdgeDraft[]>,
   closures: Map<string, Map<string, ReexportClosureEntry>>,
 ): boolean {
-  const myClosure = closures.get(filePath)!;
+  const myClosure = closures.get(filePath);
+  if (myClosure === undefined) return false;
   const before = myClosure.size;
   const drafts = edgeIndex.get(filePath);
   if (drafts === undefined) return false;
@@ -871,7 +882,8 @@ function tarjanSccs(graph: ReadonlyMap<string, ReadonlySet<string>>): FinalizedS
       entered: false,
     });
     while (iterStack.length > 0) {
-      const frame = iterStack[iterStack.length - 1]!;
+      const frame = iterStack[iterStack.length - 1];
+      if (frame === undefined) break;
 
       if (!frame.entered) {
         frame.entered = true;
@@ -889,7 +901,10 @@ function tarjanSccs(graph: ReadonlyMap<string, ReadonlySet<string>>): FinalizedS
           const scc: string[] = [];
           let selfInCycle = false;
           while (true) {
-            const w = stack.pop()!;
+            const w = stack.pop();
+            if (w === undefined) {
+              throw new Error(`Invariant violated: Tarjan stack exhausted at ${frame.node}`);
+            }
             onStack.delete(w);
             scc.push(w);
             // A single-file self-loop counts as a cycle.
@@ -904,8 +919,16 @@ function tarjanSccs(graph: ReadonlyMap<string, ReadonlySet<string>>): FinalizedS
         iterStack.pop();
         // Propagate lowlink to parent.
         if (iterStack.length > 0) {
-          const parent = iterStack[iterStack.length - 1]!;
-          lowlink.set(parent.node, Math.min(lowlink.get(parent.node)!, lowlink.get(frame.node)!));
+          const parent = iterStack[iterStack.length - 1];
+          if (parent !== undefined) {
+            lowlink.set(
+              parent.node,
+              Math.min(
+                requiredNumber(lowlink, parent.node, 'lowlink'),
+                requiredNumber(lowlink, frame.node, 'lowlink'),
+              ),
+            );
+          }
         }
         continue;
       }
@@ -918,10 +941,24 @@ function tarjanSccs(graph: ReadonlyMap<string, ReadonlySet<string>>): FinalizedS
           entered: false,
         });
       } else if (onStack.has(child)) {
-        lowlink.set(frame.node, Math.min(lowlink.get(frame.node)!, index.get(child)!));
+        lowlink.set(
+          frame.node,
+          Math.min(
+            requiredNumber(lowlink, frame.node, 'lowlink'),
+            requiredNumber(index, child, 'index'),
+          ),
+        );
       }
     }
   }
 
   return sccs;
+}
+
+function requiredNumber(map: ReadonlyMap<string, number>, key: string, label: string): number {
+  const value = map.get(key);
+  if (value === undefined) {
+    throw new Error(`Invariant violated: missing Tarjan ${label} for ${key}`);
+  }
+  return value;
 }

@@ -192,9 +192,10 @@ function decomposeNamedSpecifier(
   //   alias: identifier?            (only when `as` is present)
   //   plus an optional `type` keyword token in front (per-specifier type-only)
   //
-  // tree-sitter-typescript exposes `name` and `alias` as named fields —
-  // prefer them over positional children to tolerate grammar churn.
-  const nameNode = spec.childForFieldName('name') ?? findFirstIdentifier(spec);
+  // tree-sitter-typescript exposes `name` and `alias` as named fields.
+  // If `name` is absent, fail closed rather than guessing positionally:
+  // binding the alias as the imported name would invert the edge.
+  const nameNode = spec.childForFieldName('name');
   const aliasNode = spec.childForFieldName('alias');
   if (nameNode === null) return null;
   const name = nameNode.text;
@@ -296,7 +297,7 @@ function decomposeReexportSpecifier(
   source: string,
   stmtNode: SyntaxNode,
 ): CaptureMatch | null {
-  const nameNode = spec.childForFieldName('name') ?? findFirstIdentifier(spec);
+  const nameNode = spec.childForFieldName('name');
   const aliasNode = spec.childForFieldName('alias');
   if (nameNode === null) return null;
   const name = nameNode.text;
@@ -402,15 +403,6 @@ function stripQuotes(raw: string): string {
     return trimmed.slice(1, -1);
   }
   return trimmed;
-}
-
-function findFirstIdentifier(node: SyntaxNode): SyntaxNode | null {
-  for (let i = 0; i < node.namedChildCount; i++) {
-    const c = node.namedChild(i);
-    if (c === null) continue;
-    if (c.type === 'identifier' || c.type === 'property_identifier') return c;
-  }
-  return null;
 }
 
 function buildImportMatch(stmtNode: SyntaxNode, spec: ImportSpec): CaptureMatch {

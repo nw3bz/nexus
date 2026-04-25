@@ -207,6 +207,10 @@ export const typescriptProvider = defineLanguage({
   interpretTypeBinding: interpretTsTypeBinding,
   bindingScopeFor: tsBindingScopeFor,
   importOwningScope: tsImportOwningScope,
+  // Merge precedence is decided from BindingRef origin + declaration
+  // space only. The central finalizer already calls this per (scope,
+  // name), so the Scope object itself intentionally does not affect
+  // TypeScript declaration merging.
   mergeBindings: (_scope, bindings) => typescriptMergeBindings(bindings),
   receiverBinding: tsReceiverBinding,
   arityCompatibility: typescriptArityCompatibility,

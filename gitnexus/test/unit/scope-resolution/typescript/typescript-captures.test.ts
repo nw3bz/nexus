@@ -382,6 +382,13 @@ describe('emitTsScopeCaptures — type bindings', () => {
     expect(m!['@type-binding.type'].text).toBe('User');
   });
 
+  it('documents limitation: member-expression `instanceof` narrowing is not synthesized', () => {
+    const m = findMatch('if (user.address instanceof Address) { user.address.save(); }', (t) =>
+      t.includes('@type-binding.assertion'),
+    );
+    expect(m).toBeUndefined();
+  });
+
   it('captures class field annotations', () => {
     // Field-level @type-binding.annotation and @declaration.property fire
     // as separate matches (different query patterns), not combined on one
