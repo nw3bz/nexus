@@ -401,6 +401,14 @@ function synthesizeForOfMapTupleBindings(root: SyntaxNode, out: CaptureMatch[]):
  * `if (x instanceof User) { x.save() }` — synthesize a `User` type binding
  * for `x` anchored in the consequence block so scope-chain lookup inside
  * the then-branch sees the narrowed type.
+ *
+ * **Known limitation:** the LHS must be a bare `identifier` and the RHS
+ * an `identifier`/`type_identifier`. Member-expression LHS such as
+ * `if (user.address instanceof Address)` is intentionally NOT synthesized
+ * — narrowing a property-access target requires a stable storage key
+ * the binding layer can hold, which member chains don't supply. Field-
+ * type resolution covers the common case for those receivers via
+ * declared types instead.
  */
 function synthesizeInstanceofNarrowings(root: SyntaxNode, out: CaptureMatch[]): void {
   const stack: SyntaxNode[] = [root];

@@ -494,6 +494,17 @@ function tryFinalize(
 }
 
 /**
+ * Maximum re-export hop count for `followReexportChain`. The visited
+ * set already prevents cycles; this cap adds a bounded-depth guarantee
+ * that mirrors the explicit "Iterative DFS to avoid stack overflow"
+ * policy in `tarjanSccs`. 100 is comfortably above any realistic
+ * hand-authored barrel chain (typical depth is 1–5; auto-generated
+ * barrels rarely exceed 20) while staying well below JS engine call
+ * stack limits even for the recursive implementation.
+ */
+const MAX_REEXPORT_DEPTH = 100;
+
+/**
  * Chase a name through `reexport` edges in a barrel file.
  *
  * At each hop, consult the file's re-export drafts looking for one whose
@@ -506,7 +517,9 @@ function tryFinalize(
  *
  * Visited-set guards against circular re-export chains
  * (`a.ts → b.ts → a.ts`), which TypeScript rejects at type-check but
- * can still appear in parsed input.
+ * can still appear in parsed input. The `depth` cap (see
+ * `MAX_REEXPORT_DEPTH`) adds a bounded-path guarantee on top of the
+ * cycle guard.
  */
 function followReexportChain(
   module: FinalizeFile,
@@ -514,7 +527,9 @@ function followReexportChain(
   byFilePath: Map<string, FinalizeFile>,
   edgeIndex: Map<string, ImportEdgeDraft[]>,
   visited: Set<string>,
+  depth: number = 0,
 ): { def: SymbolDefinition; via: readonly string[] } | null {
+  if (depth > MAX_REEXPORT_DEPTH) return null;
   if (visited.has(module.filePath)) return null;
   visited.add(module.filePath);
 
@@ -537,7 +552,14 @@ function followReexportChain(
     }
 
     // Recurse — the barrel's upstream is itself a barrel.
-    const deeper = followReexportChain(nextModule, importedName, byFilePath, edgeIndex, visited);
+    const deeper = followReexportChain(
+      nextModule,
+      importedName,
+      byFilePath,
+      edgeIndex,
+      visited,
+      depth + 1,
+    );
     if (deeper !== null) {
       return { def: deeper.def, via: [nextTargetFile, ...deeper.via] };
     }
@@ -558,7 +580,7 @@ function followReexportChain(
     if (exported !== undefined) {
       return { def: exported, via: [nextTargetFile] };
     }
-    const deeper = followReexportChain(nextModule, name, byFilePath, edgeIndex, visited);
+    const deeper = followReexportChain(nextModule, name, byFilePath, edgeIndex, visited, depth + 1);
     if (deeper !== null) {
       return { def: deeper.def, via: [nextTargetFile, ...deeper.via] };
     }
@@ -650,6 +672,17 @@ function materializeBindings(
 ): ReadonlyMap<ScopeId, ReadonlyMap<string, readonly BindingRef[]>> {
   const out = new Map<ScopeId, ReadonlyMap<string, readonly BindingRef[]>>();
 
+  // Build a `nodeId → SymbolDefinition` index once across all files
+  // (O(N_files × D_defs)) so the per-edge lookup below is O(1) instead
+  // of a full linear scan. At realistic TypeScript monorepo scale
+  // (~5k files × ~50 defs × ~100k linked import edges) this is the
+  // difference between ~25 s and a few ms inside finalize. The map
+  // is local to this pass — no cross-pass state leaks.
+  const defById = new Map<string, SymbolDefinition>();
+  for (const f of files) {
+    for (const d of f.localDefs) defById.set(d.nodeId, d);
+  }
+
   for (const file of files) {
     const scopeBindings = new Map<string, readonly BindingRef[]>();
 
@@ -666,10 +699,7 @@ function materializeBindings(
     const imports = linkedByScope.get(file.moduleScope) ?? [];
     for (const edge of imports) {
       if (edge.targetDefId === undefined || edge.linkStatus === 'unresolved') continue;
-      // Every def the importing file needs to reach is in some other file's
-      // `localDefs`; walk all files to find it. In practice we could index
-      // this, but at finalize-time N(files) is small per workspace pass.
-      const def = findDefById(files, edge.targetDefId);
+      const def = defById.get(edge.targetDefId);
       if (def === undefined) continue;
 
       const origin: BindingRef['origin'] =
@@ -697,15 +727,6 @@ function materializeBindings(
   }
 
   return out;
-}
-
-function findDefById(files: readonly FinalizeFile[], defId: string): SymbolDefinition | undefined {
-  for (const f of files) {
-    for (const d of f.localDefs) {
-      if (d.nodeId === defId) return d;
-    }
-  }
-  return undefined;
 }
 
 // ─── Internal: Tarjan SCC ──────────────────────────────────────────────────

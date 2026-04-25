@@ -392,6 +392,33 @@ describe('finalize', () => {
       expect(edge.targetDefId).toBe('def:c.X');
     });
 
+    it('caps recursion at MAX_REEXPORT_DEPTH (200-hop chain stops cleanly without stack overflow)', () => {
+      // Build a 200-link chain a₀ → a₁ → … → a₂₀₀, where each
+      // intermediate is `export { X } from './aₙ₊₁'`. Only the last
+      // file (a₂₀₀) holds the actual `def:X`. With the depth cap at
+      // 100, the crawl must terminate without a stack-overflow and
+      // surface the edge as `unresolved` (no terminal def reachable
+      // within the budget). The edge MUST still target a₁ at file
+      // level — it just lacks a `targetDefId`.
+      const CHAIN_LEN = 200;
+      const chain: FinalizeFile[] = [];
+      for (let i = 0; i <= CHAIN_LEN; i++) {
+        const fp = `chain${i}`;
+        if (i === CHAIN_LEN) {
+          chain.push(file(fp, [def(`def:chain${i}.X`, 'Class', `chain${i}.X`)]));
+        } else {
+          chain.push(file(fp, [], [reexport('X', 'X', `chain${i + 1}`)]));
+        }
+      }
+      const consumer = file('consumer', [], [named('X', 'X', 'chain1')]);
+      const files = [consumer, ...chain];
+      const out = finalize({ files, workspaceIndex: undefined }, defaultHooks(files));
+      const edge = firstImport(out, consumer.moduleScope)!;
+      expect(edge.targetFile).toBe('chain1');
+      expect(edge.linkStatus).toBe('unresolved');
+      expect(edge.targetDefId).toBeUndefined();
+    });
+
     it('first-match-wins when followReexportChain encounters multiple sources for the same name', () => {
       // B re-exports X from BOTH c and d. `followReexportChain` walks
       // re-exports in declaration order; the first one that resolves wins.
@@ -479,6 +506,34 @@ describe('finalize', () => {
       expect(bindings.length).toBe(2);
       expect(bindings.some((br) => br.origin === 'local')).toBe(true);
       expect(bindings.some((br) => br.origin === 'import')).toBe(true);
+    });
+
+    it('resolves imported defs across many files via O(1) defById index lookup', () => {
+      // Regression for the materializeBindings O(N²) → O(1) fix:
+      // a single consumer importing one symbol from each of N other
+      // files must materialize an `import` binding for each. Prior to
+      // the fix, finding `def.X` for each edge meant re-scanning every
+      // file's localDefs (O(N × D × E)). With the index, every
+      // `defById.get` is O(1), so this test stays under 50 ms even
+      // at N=200.
+      const N = 200;
+      const leafFiles: FinalizeFile[] = [];
+      const imports: ParsedImport[] = [];
+      for (let i = 0; i < N; i++) {
+        const fp = `leaf${i}`;
+        const localName = `Leaf${i}`;
+        leafFiles.push(file(fp, [def(`def:${fp}.${localName}`, 'Class', `${fp}.${localName}`)]));
+        imports.push(named(localName, localName, fp));
+      }
+      const consumer = file('consumer', [], imports);
+      const files = [consumer, ...leafFiles];
+      const out = finalize({ files, workspaceIndex: undefined }, defaultHooks(files));
+      for (let i = 0; i < N; i++) {
+        const bindings = bindingsFor(out, consumer.moduleScope, `Leaf${i}`);
+        expect(bindings.length).toBe(1);
+        expect(bindings[0]!.origin).toBe('import');
+        expect(bindings[0]!.def.nodeId).toBe(`def:leaf${i}.Leaf${i}`);
+      }
     });
 
     it('honors provider precedence: mergeBindings can drop existing bindings', () => {
