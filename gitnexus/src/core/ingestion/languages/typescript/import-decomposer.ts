@@ -257,8 +257,8 @@ function splitReexport(stmtNode: SyntaxNode): CaptureMatch[] {
   //      scope-extractor adds a `Namespace` SymbolDefinition for `ns`
   //      to the barrel's `localDefs`. Without this, downstream files
   //      doing `import { ns } from './barrel'` cannot resolve `ns`:
-  //      `findExportByName` and `followReexportChain` only look at
-  //      `localDefs` / `reexport` / `wildcard` drafts, never at
+  //      `findExportByName` and the precomputed re-export closure only
+  //      consult `localDefs` / `reexport` / `wildcard` drafts, never
   //      `namespace`-kind imports. The synthetic declaration fixes that
   //      without growing the shared finalizer's surface.
   const namespaceExport = findChild(stmtNode, 'namespace_export');

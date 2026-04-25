@@ -299,14 +299,15 @@ describe('finalize', () => {
       expect(reexportEdge.transitiveVia).toEqual(['c']);
     });
 
-    it('multi-hop re-export chains resolve via followReexportChain even when intermediate files do not surface the name', () => {
+    it('multi-hop re-export chains resolve via the precomputed closure even when intermediate files do not surface the name', () => {
       // Contract (see FinalizeFile.localDefs doc): `finalize` first looks
       // up `importedName` in `B.localDefs`. If B only has
       //   export { X } from './C'
       // and does NOT surface X in its own localDefs, finalize falls back
-      // to `followReexportChain`, which crawls B's reexport drafts to
-      // locate X in a downstream module's localDefs and inherits the leaf
-      // `targetDefId`. The visited set guards against import cycles.
+      // to the precomputed re-export closure (`buildReexportClosures`),
+      // which encodes every name reachable through B's reexport/wildcard
+      // chain. The lookup is O(1) and inherits the leaf `targetDefId`.
+      // SCC-condensed iteration handles cyclic chains structurally.
       //
       // The "thin" variant (B does not surface X) resolves to C's def
       // via the re-export chain. The "thick" variant (B has its own X
@@ -331,10 +332,10 @@ describe('finalize', () => {
 
       // Variant 2: B surfaces X via its OWN localDefs (distinct nodeId
       // from C's X) → direct B.localDefs lookup short-circuits the
-      // recursive re-export crawl. This is the "shadowing" optimization:
-      // when B explicitly surfaces a name, importers see B's def, not
-      // the upstream one. `transitiveVia` is undefined since no chain
-      // walk happened.
+      // closure consult. This is the "shadowing" optimization: when B
+      // explicitly surfaces a name, importers see B's def, not the
+      // upstream one. `transitiveVia` is undefined since no chain walk
+      // happened.
       const bThick = file('b', [def('def:b.X', 'Class', 'b.X')], [reexport('X', 'X', 'c')]);
       const aThick = file('a', [], [named('X', 'X', 'b')]);
       const thickFiles = [aThick, bThick, c];
@@ -363,25 +364,27 @@ describe('finalize', () => {
 
     it('terminates without infinite recursion when re-exports cycle back through the chain', () => {
       // Cycle: b re-exports from c, c re-exports from b. Neither surfaces
-      // X. `followReexportChain`'s visited set prevents infinite recursion;
-      // the edge resolves as unresolved (no terminal localDef found) but
-      // the call must return.
+      // X. The SCC-condensed closure builder lumps b+c into one cyclic
+      // SCC and runs a bounded fixpoint inside it; with no terminal def
+      // anywhere in the cycle, the closure entry for X never appears
+      // and the consuming edge is correctly marked unresolved. No call
+      // stack involvement at any point.
       const c = file('c', [], [reexport('X', 'X', 'b')]);
       const b = file('b', [], [reexport('X', 'X', 'c')]);
       const a = file('a', [], [named('X', 'X', 'b')]);
       const files = [a, b, c];
       const out = finalize({ files, workspaceIndex: undefined }, defaultHooks(files));
       const edge = firstImport(out, a.moduleScope)!;
-      // Cycle exhausts the chain crawl → unresolved name (file is known).
       expect(edge.targetFile).toBe('b');
       expect(edge.linkStatus).toBe('unresolved');
       expect(edge.targetDefId).toBeUndefined();
     });
 
-    it('falls through wildcard re-exports when followReexportChain crawls', () => {
+    it('falls through wildcard re-exports via the precomputed closure', () => {
       // B has `export * from './c'` (wildcard re-export). A imports `X`
-      // from B. `followReexportChain` should fall through the wildcard to
-      // find X in C.localDefs.
+      // from B. The closure builder fans out the wildcard at B by
+      // copying every name from C's localDefs (and C's own closure)
+      // into B's closure, so the lookup at finalize time is O(1).
       const c = file('c', [def('def:c.X', 'Class', 'c.X')]);
       const b = file('b', [], [wildcard('c')]);
       const a = file('a', [], [named('X', 'X', 'b')]);
@@ -392,15 +395,18 @@ describe('finalize', () => {
       expect(edge.targetDefId).toBe('def:c.X');
     });
 
-    it('caps recursion at MAX_REEXPORT_DEPTH (200-hop chain stops cleanly without stack overflow)', () => {
-      // Build a 200-link chain a₀ → a₁ → … → a₂₀₀, where each
+    it('resolves arbitrarily deep re-export chains without stack overflow (1000 hops, fully linked)', () => {
+      // Build a 1000-link chain a₀ → a₁ → … → a₁₀₀₀, where each
       // intermediate is `export { X } from './aₙ₊₁'`. Only the last
-      // file (a₂₀₀) holds the actual `def:X`. With the depth cap at
-      // 100, the crawl must terminate without a stack-overflow and
-      // surface the edge as `unresolved` (no terminal def reachable
-      // within the budget). The edge MUST still target a₁ at file
-      // level — it just lacks a `targetDefId`.
-      const CHAIN_LEN = 200;
+      // file holds the actual `def:X`. The legacy recursive
+      // implementation needed `MAX_REEXPORT_DEPTH=100` purely as a
+      // call-stack ceiling (anything deeper would crash); the new
+      // SCC-condensed iterative closure resolves the entire chain
+      // structurally with zero stack involvement. Asserting full
+      // resolution + accurate `transitiveVia` proves both that the
+      // recursion is gone AND that the closure correctly inherits
+      // the leaf def across all hops.
+      const CHAIN_LEN = 1000;
       const chain: FinalizeFile[] = [];
       for (let i = 0; i <= CHAIN_LEN; i++) {
         const fp = `chain${i}`;
@@ -415,13 +421,19 @@ describe('finalize', () => {
       const out = finalize({ files, workspaceIndex: undefined }, defaultHooks(files));
       const edge = firstImport(out, consumer.moduleScope)!;
       expect(edge.targetFile).toBe('chain1');
-      expect(edge.linkStatus).toBe('unresolved');
-      expect(edge.targetDefId).toBeUndefined();
+      expect(edge.linkStatus).toBeUndefined();
+      expect(edge.targetDefId).toBe(`def:chain${CHAIN_LEN}.X`);
+      // `transitiveVia` enumerates every intermediate file from chain1
+      // through chain1000 — proves the closure walked the full path.
+      expect(edge.transitiveVia).toBeDefined();
+      expect(edge.transitiveVia!.length).toBe(CHAIN_LEN);
+      expect(edge.transitiveVia![0]).toBe('chain1');
+      expect(edge.transitiveVia![CHAIN_LEN - 1]).toBe(`chain${CHAIN_LEN}`);
     });
 
-    it('first-match-wins when followReexportChain encounters multiple sources for the same name', () => {
-      // B re-exports X from BOTH c and d. `followReexportChain` walks
-      // re-exports in declaration order; the first one that resolves wins.
+    it('first-match-wins when the closure encounters multiple sources for the same name', () => {
+      // B re-exports X from BOTH c and d. The closure builder walks
+      // re-exports in declaration order; first match wins.
       // Resolution must be deterministic (no flaky picks).
       const c = file('c', [def('def:c.X', 'Class', 'c.X')]);
       const d = file('d', [def('def:d.X', 'Class', 'd.X')]);

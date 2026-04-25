@@ -51,19 +51,19 @@ export interface FinalizeFile {
    * **Multi-hop re-export contract.** `finalize` resolves an edge
    * `A → B (importedName: 'X')` by first looking up `X` in `B.localDefs`.
    * If `B` only has `export { X } from './C'` and does NOT surface `X` in
-   * its own `localDefs`, `finalize` falls back to `followReexportChain`,
-   * which traverses `B`'s `reexport` (and `wildcard` re-export) drafts
-   * to locate `X` in a downstream module's `localDefs`. The chain is
-   * cycle-guarded via a per-call visited set and inherits the
-   * upstream `targetDefId`, populating `transitiveVia` with the visited
-   * file path(s).
+   * its own `localDefs`, `finalize` falls back to the precomputed
+   * per-file re-export closure (`buildReexportClosures`), which encodes
+   * every name reachable through `B`'s named and wildcard re-exports —
+   * including transitively through cyclic SCCs. The lookup is O(1) and
+   * inherits the upstream `targetDefId`, populating `transitiveVia` with
+   * the file paths traversed to reach the leaf def.
    *
    * Surfacing re-exported names in `localDefs` is still a valid (and
    * slightly cheaper) optimization: the direct lookup short-circuits the
-   * recursive crawl. Parsers SHOULD prefer surfacing names they can resolve
+   * closure consult. Parsers SHOULD prefer surfacing names they can resolve
    * statically (e.g., `export { X } from './c'` when `c.ts` is parsed in
-   * the same workspace), and rely on `followReexportChain` for the long
-   * tail of barrel patterns.
+   * the same workspace), and rely on the closure for the long tail of
+   * barrel patterns.
    *
    * The fixpoint does NOT mutate `localDefs` across iterations — it is
    * static input.
@@ -205,6 +205,12 @@ export function finalize(input: FinalizeInput, hooks: FinalizeHooks): FinalizeOu
   // ── Phase 2: Tarjan SCC → reverse-topological list of SCCs.
   const sccs = tarjanSccs(graph);
 
+  // ── Phase 2.5: precompute the per-file re-export closure (iterative,
+  // SCC-condensed). Eliminates the recursive crawl that the per-edge
+  // `tryFinalize` call site used to do; lookups are O(1) afterwards.
+  // See `buildReexportClosures` for the algorithm.
+  const reexportClosures = buildReexportClosures(input.files, byFilePath, edgeIndex);
+
   // ── Phase 3: process SCCs in reverse-topological order (leaves first).
   // Within each SCC, run a bounded fixpoint that resolves intra-SCC edges.
   // Edges leaving the SCC are already resolved (their target SCC is
@@ -228,7 +234,7 @@ export function finalize(input: FinalizeInput, hooks: FinalizeHooks): FinalizeOu
         const drafts = edgeIndex.get(filePath)!;
         for (const draft of drafts) {
           if (draft.finalized !== null) continue;
-          const finalized = tryFinalize(draft, byFilePath, edgeIndex);
+          const finalized = tryFinalize(draft, byFilePath, reexportClosures);
           if (finalized !== null) {
             draft.finalized = finalized;
             progressed = true;
@@ -410,7 +416,7 @@ function extractExportedName(parsed: ParsedImport): string {
 function tryFinalize(
   draft: ImportEdgeDraft,
   byFilePath: Map<string, FinalizeFile>,
-  edgeIndex: Map<string, ImportEdgeDraft[]>,
+  reexportClosures: ReadonlyMap<string, FileReexportClosure>,
 ): ImportEdge | null {
   const targetFile = draft.targetFile;
   if (targetFile === null) return draft.base; // already terminal
@@ -463,18 +469,11 @@ function tryFinalize(
   //   // models.ts
   //   export { User } from './base';
   // emit no local def for `User`; the name surfaces only via their own
-  // `reexport` edge. Consult the target's `reexport` drafts for a
-  // matching `localName === importedName`, prefer the finalized one (its
-  // `targetDefId` is the upstream symbol), and inherit that defId +
-  // chain metadata. Stays O(1) per chain hop by relying on the caller's
-  // fixpoint to settle leaf-first.
-  const followed = followReexportChain(
-    targetModule,
-    importedName,
-    byFilePath,
-    edgeIndex,
-    new Set<string>(),
-  );
+  // `reexport` edge. The per-file re-export closure built in phase 2.5
+  // already encodes every name reachable through that file's named and
+  // wildcard re-exports — including transitively through cyclic SCCs —
+  // so the lookup is O(1) and never recurses.
+  const followed = lookupReexportedName(reexportClosures, targetFile, importedName);
   if (followed === null) {
     // Target resolvable but the name isn't exported — keep trying in case a
     // re-export inside the target's SCC surfaces it in a later iteration.
@@ -493,100 +492,216 @@ function tryFinalize(
   };
 }
 
-/**
- * Maximum re-export hop count for `followReexportChain`. The visited
- * set already prevents cycles; this cap adds a bounded-depth guarantee
- * that mirrors the explicit "Iterative DFS to avoid stack overflow"
- * policy in `tarjanSccs`. 100 is comfortably above any realistic
- * hand-authored barrel chain (typical depth is 1–5; auto-generated
- * barrels rarely exceed 20) while staying well below JS engine call
- * stack limits even for the recursive implementation.
- */
-const MAX_REEXPORT_DEPTH = 100;
+// ─── Internal: re-export closure (phase 2.5) ───────────────────────────────
 
 /**
- * Chase a name through `reexport` edges in a barrel file.
+ * Per-file map of `name → terminal def + via path` — i.e. every name
+ * importable from this file via its named/wildcard re-export chain
+ * (excluding the file's own `localDefs`, which the caller checks first
+ * via `findExportByName`). `via` is the ordered list of intermediate
+ * files traversed to reach the def.
  *
- * At each hop, consult the file's re-export drafts looking for one whose
- * `localName === name`. If the edge has finalized (has a `targetDefId`
- * pointing into a leaf file's `localDefs`), return the leaf def. If the
- * edge is still a draft (leaf not yet processed this iteration), recurse
- * into its target file. Wildcard re-exports (`export * from './m'`) are
- * also followed opportunistically — they expand to whatever `name`
- * resolves to in the wildcard target's localDefs or further reexports.
- *
- * Visited-set guards against circular re-export chains
- * (`a.ts → b.ts → a.ts`), which TypeScript rejects at type-check but
- * can still appear in parsed input. The `depth` cap (see
- * `MAX_REEXPORT_DEPTH`) adds a bounded-path guarantee on top of the
- * cycle guard.
+ * Built once per finalize pass. Lookups are O(1).
  */
-function followReexportChain(
-  module: FinalizeFile,
-  name: string,
-  byFilePath: Map<string, FinalizeFile>,
-  edgeIndex: Map<string, ImportEdgeDraft[]>,
-  visited: Set<string>,
-  depth: number = 0,
-): { def: SymbolDefinition; via: readonly string[] } | null {
-  if (depth > MAX_REEXPORT_DEPTH) return null;
-  if (visited.has(module.filePath)) return null;
-  visited.add(module.filePath);
+type ReexportClosureEntry = { readonly def: SymbolDefinition; readonly via: readonly string[] };
+type FileReexportClosure = ReadonlyMap<string, ReexportClosureEntry>;
 
-  const drafts = edgeIndex.get(module.filePath);
-  if (drafts === undefined) return null;
+/**
+ * Build per-file re-export closures.
+ *
+ * **Algorithm.** Iterative SCC-condensed reverse-topological propagation,
+ * structurally identical to how `finalize` itself processes the file-
+ * level import graph. Replaces the legacy recursive
+ * `followReexportChain` crawl with a bounded, stack-safe pass:
+ *
+ *   1. **Sub-graph.** Build a directed graph whose edges are
+ *      `reexport` and `wildcard` drafts only (regular imports do not
+ *      contribute to the export surface, and `namespace`/
+ *      `reexport-namespace` are terminal — their target def lives in
+ *      `localDefs`).
+ *   2. **SCC condensation.** Run the same iterative `tarjanSccs` over
+ *      the sub-graph. Output is in reverse-topological order (leaves
+ *      first), so when we process an SCC every out-of-SCC neighbor
+ *      already has its closure populated.
+ *   3. **Per-SCC propagation.**
+ *        * Acyclic singleton: one pass — read neighbors' (already
+ *          fully populated) closures.
+ *        * Cyclic SCC (cycle ≥ 2 files, or self-loop): bounded
+ *          fixpoint inside the SCC, capped at `|SCC| + 1` iterations
+ *          (each iteration propagates names one hop further around
+ *          the cycle; first-wins precedence keeps the map monotone
+ *          so the fixpoint converges in at most |SCC| hops).
+ *
+ * **Precedence semantics — preserved from the recursive crawl.**
+ *   * Named re-exports take precedence over wildcards.
+ *   * Within each kind, declaration order wins (first match for a
+ *     given exported name is kept; later drafts skip).
+ *
+ * **Complexity.**
+ *   * Pre-pass: O(V + E_re) for SCC, plus O(|SCC| × Σ drafts) per cyclic
+ *     SCC. For tree-shaped barrel graphs (the common case) it
+ *     collapses to O(E_re) total.
+ *   * Per-edge lookup at finalize time: O(1).
+ *   * Pathological deep chains that previously needed
+ *     `MAX_REEXPORT_DEPTH=100` to bound stack growth now resolve
+ *     in full and are bounded only by available memory — the
+ *     iterative formulation has no call-stack ceiling.
+ */
+function buildReexportClosures(
+  files: readonly FinalizeFile[],
+  byFilePath: ReadonlyMap<string, FinalizeFile>,
+  edgeIndex: ReadonlyMap<string, ImportEdgeDraft[]>,
+): ReadonlyMap<string, FileReexportClosure> {
+  const closures = new Map<string, Map<string, ReexportClosureEntry>>();
+  for (const file of files) closures.set(file.filePath, new Map());
 
-  // Named re-exports first (more specific).
+  // ── Step 1: build the re-export sub-graph (only resolvable
+  // reexport/wildcard targets contribute edges).
+  const subGraph = new Map<string, Set<string>>();
+  for (const file of files) {
+    const targets = new Set<string>();
+    const drafts = edgeIndex.get(file.filePath);
+    if (drafts !== undefined) {
+      for (const d of drafts) {
+        if (d.source.kind !== 'reexport' && d.source.kind !== 'wildcard') continue;
+        if (d.targetFile === null) continue;
+        if (!byFilePath.has(d.targetFile)) continue;
+        targets.add(d.targetFile);
+      }
+    }
+    subGraph.set(file.filePath, targets);
+  }
+
+  // ── Step 2: SCC over the sub-graph. Reuses the same iterative Tarjan
+  // implementation that drives the file-level finalize loop, so any
+  // call-stack-safety guarantees there transfer here unchanged.
+  const subSccs = tarjanSccs(subGraph);
+
+  // ── Step 3: process SCCs in reverse-topological order. Acyclic
+  // singletons settle in one pass; cyclic SCCs run a bounded fixpoint.
+  for (const scc of subSccs) {
+    if (!scc.isCycle) {
+      populateFileClosure(scc.files[0]!, byFilePath, edgeIndex, closures);
+      continue;
+    }
+    // Cap = |SCC| + 1. With first-wins precedence each name needs at
+    // most |SCC| iterations to propagate fully around the cycle; the
+    // extra iteration confirms no progress and breaks the loop.
+    const cap = scc.files.length + 1;
+    let progressed = true;
+    let iter = 0;
+    while (progressed && iter < cap) {
+      progressed = false;
+      iter++;
+      for (const filePath of scc.files) {
+        if (populateFileClosure(filePath, byFilePath, edgeIndex, closures)) {
+          progressed = true;
+        }
+      }
+    }
+  }
+
+  return closures;
+}
+
+/**
+ * Populate one file's re-export closure for one pass. Returns `true`
+ * iff the closure grew (signalling fixpoint progress to the caller).
+ *
+ * Walks the file's drafts in declaration order, named re-exports first
+ * (precedence), then wildcards. For each draft, attempts:
+ *   1. **Direct hit** — name exists in the target file's `localDefs`.
+ *   2. **Inherited** — name exists in the target file's already-populated
+ *      closure (which encodes the target's own re-export chain).
+ *
+ * `closures.get(targetFile)` may itself still be empty for in-SCC
+ * targets on the first iteration; the outer fixpoint loop handles
+ * that by re-invoking this function.
+ */
+function populateFileClosure(
+  filePath: string,
+  byFilePath: ReadonlyMap<string, FinalizeFile>,
+  edgeIndex: ReadonlyMap<string, ImportEdgeDraft[]>,
+  closures: Map<string, Map<string, ReexportClosureEntry>>,
+): boolean {
+  const myClosure = closures.get(filePath)!;
+  const before = myClosure.size;
+  const drafts = edgeIndex.get(filePath);
+  if (drafts === undefined) return false;
+
+  // Named re-exports — precedence over wildcards, declaration order
+  // first-wins for duplicates of the same exported name.
   for (const draft of drafts) {
     if (draft.source.kind !== 'reexport') continue;
-    if (draft.source.localName !== name) continue;
-    const nextTargetFile = draft.targetFile;
-    if (nextTargetFile === null) continue;
-    const nextModule = byFilePath.get(nextTargetFile);
-    if (nextModule === undefined) continue;
+    const targetFile = draft.targetFile;
+    if (targetFile === null) continue;
+    const targetModule = byFilePath.get(targetFile);
+    if (targetModule === undefined) continue;
+
+    const localName = draft.source.localName;
+    if (myClosure.has(localName)) continue;
 
     const importedName = draft.source.importedName;
-    const exported = findExportByName(nextModule.localDefs, importedName);
-    if (exported !== undefined) {
-      return { def: exported, via: [nextTargetFile] };
+    const direct = findExportByName(targetModule.localDefs, importedName);
+    if (direct !== undefined) {
+      myClosure.set(localName, { def: direct, via: Object.freeze([targetFile]) });
+      continue;
     }
-
-    // Recurse — the barrel's upstream is itself a barrel.
-    const deeper = followReexportChain(
-      nextModule,
-      importedName,
-      byFilePath,
-      edgeIndex,
-      visited,
-      depth + 1,
-    );
-    if (deeper !== null) {
-      return { def: deeper.def, via: [nextTargetFile, ...deeper.via] };
+    const inherited = closures.get(targetFile)?.get(importedName);
+    if (inherited !== undefined) {
+      myClosure.set(localName, {
+        def: inherited.def,
+        via: Object.freeze([targetFile, ...inherited.via]),
+      });
     }
+    // Else: target's closure is still empty (in-SCC, awaiting next
+    // iteration). Outer loop will revisit.
   }
 
-  // Wildcard re-exports (`export * from './m'`) — fan out and keep the
-  // first match. `source.kind === 'wildcard'` here because the
-  // decomposer classifies `export * from ...` as `reexport-wildcard` →
-  // `wildcard` (see TypeScript import-decomposer).
+  // Wildcard re-exports — fan out the target's own surface (localDefs
+  // + transitive closure). `myClosure.has(name)` checks below preserve
+  // the named-precedence and first-wins semantics from above.
   for (const draft of drafts) {
     if (draft.source.kind !== 'wildcard') continue;
-    const nextTargetFile = draft.targetFile;
-    if (nextTargetFile === null) continue;
-    const nextModule = byFilePath.get(nextTargetFile);
-    if (nextModule === undefined) continue;
+    const targetFile = draft.targetFile;
+    if (targetFile === null) continue;
+    const targetModule = byFilePath.get(targetFile);
+    if (targetModule === undefined) continue;
 
-    const exported = findExportByName(nextModule.localDefs, name);
-    if (exported !== undefined) {
-      return { def: exported, via: [nextTargetFile] };
+    for (const def of targetModule.localDefs) {
+      const name = deriveSimpleName(def);
+      if (name === null || myClosure.has(name)) continue;
+      myClosure.set(name, { def, via: Object.freeze([targetFile]) });
     }
-    const deeper = followReexportChain(nextModule, name, byFilePath, edgeIndex, visited, depth + 1);
-    if (deeper !== null) {
-      return { def: deeper.def, via: [nextTargetFile, ...deeper.via] };
+    const targetClosure = closures.get(targetFile);
+    if (targetClosure !== undefined) {
+      for (const [name, entry] of targetClosure) {
+        if (myClosure.has(name)) continue;
+        myClosure.set(name, {
+          def: entry.def,
+          via: Object.freeze([targetFile, ...entry.via]),
+        });
+      }
     }
   }
 
-  return null;
+  return myClosure.size > before;
+}
+
+/**
+ * O(1) lookup into a precomputed re-export closure. Replaces the legacy
+ * recursive `followReexportChain` traversal with a single map indexing.
+ */
+function lookupReexportedName(
+  closures: ReadonlyMap<string, FileReexportClosure>,
+  filePath: string,
+  name: string,
+): { def: SymbolDefinition; via: readonly string[] } | null {
+  const closure = closures.get(filePath);
+  if (closure === undefined) return null;
+  const entry = closure.get(name);
+  if (entry === undefined) return null;
+  return { def: entry.def, via: entry.via };
 }
 
 /**
