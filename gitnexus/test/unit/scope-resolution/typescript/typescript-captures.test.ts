@@ -290,6 +290,27 @@ describe('emitTsScopeCaptures — imports (decomposed)', () => {
     expect(m!['@import.kind'].text).toBe('dynamic');
     expect(m!['@import.source'].text).toBe('./m');
   });
+
+  it('marks literal dynamic imports with @import.literal so the interpreter can flag them resolvable', () => {
+    const src = "const m = import('./m');";
+    const m = findMatch(src, (t) => t.includes('@import.statement'));
+    expect(m).toBeDefined();
+    expect(m!['@import.literal']).toBeDefined();
+  });
+
+  it('does NOT mark non-literal dynamic imports with @import.literal', () => {
+    const src = 'const m = import(spec);';
+    const m = findMatch(src, (t) => t.includes('@import.statement'));
+    expect(m).toBeDefined();
+    expect(m!['@import.literal']).toBeUndefined();
+  });
+
+  it('emits a synthetic @declaration.namespace for `export * as ns from "./m"` (barrel binding)', () => {
+    const src = "export * as Models from './base';";
+    const m = findMatch(src, (t) => t.includes('@declaration.namespace'));
+    expect(m).toBeDefined();
+    expect(m!['@declaration.name'].text).toBe('Models');
+  });
 });
 
 describe('emitTsScopeCaptures — type bindings', () => {

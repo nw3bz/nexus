@@ -62,6 +62,14 @@ interface RunScopeResolutionInput {
    * is safe — falls back to a fresh parse inside the provider.
    */
   readonly treeCache?: { get(filePath: string): unknown };
+  /**
+   * Opaque per-language import-resolution config (e.g. tsconfig path
+   * aliases for TypeScript). Loaded once by the caller via
+   * `provider.loadResolutionConfig(repoPath)` and threaded into every
+   * `provider.resolveImportTarget` call. `undefined` when the
+   * provider doesn't supply a config loader.
+   */
+  readonly resolutionConfig?: unknown;
 }
 
 interface RunScopeResolutionStats {
@@ -135,10 +143,11 @@ export function runScopeResolution(
   const nodeLookup = buildGraphNodeLookup(graph);
   const mroByClassDefId = provider.buildMro(graph, parsedFiles, nodeLookup);
 
+  const resolutionConfig = input.resolutionConfig;
   const finalized = finalizeScopeModel(parsedFiles, {
     hooks: {
       resolveImportTarget: (targetRaw, fromFile) =>
-        provider.resolveImportTarget(targetRaw, fromFile, allFilePaths),
+        provider.resolveImportTarget(targetRaw, fromFile, allFilePaths, resolutionConfig),
       mergeBindings: (existing, incoming, scopeId) =>
         provider.mergeBindings(existing, incoming, scopeId),
     },

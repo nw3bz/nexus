@@ -191,16 +191,15 @@ describe('interpretTsImport — re-exports', () => {
 });
 
 describe('interpretTsImport — dynamic imports', () => {
-  it('literal argument: `import("./m")` → dynamic-unresolved with targetRaw', () => {
+  it('literal argument: `import("./m")` → dynamic-resolved (targetRaw is a literal path)', () => {
     const [imp] = importsFor('const p = import("./m");');
     expect(imp).toEqual({
-      kind: 'dynamic-unresolved',
-      localName: '',
+      kind: 'dynamic-resolved',
       targetRaw: './m',
     });
   });
 
-  it('non-literal argument: `import(expr)` preserves the expr text', () => {
+  it('non-literal argument: `import(expr)` stays dynamic-unresolved', () => {
     const [imp] = importsFor('const p = import(x);');
     expect(imp?.kind).toBe('dynamic-unresolved');
     expect((imp as { targetRaw: string | null }).targetRaw).toBe('x');
@@ -210,6 +209,14 @@ describe('interpretTsImport — dynamic imports', () => {
     const [imp] = importsFor('const p = import(`./m/${name}`);');
     expect(imp?.kind).toBe('dynamic-unresolved');
     expect((imp as { targetRaw: string | null }).targetRaw).toContain('name');
+  });
+
+  it('await + literal: `await import("./m")` → dynamic-resolved', () => {
+    const [imp] = importsFor('async function f() { return await import("./m"); }');
+    expect(imp).toEqual({
+      kind: 'dynamic-resolved',
+      targetRaw: './m',
+    });
   });
 });
 
@@ -301,10 +308,9 @@ describe('resolveTsImportTarget — standard suffix + alias resolution', () => {
     expect(result).toBe(null);
   });
 
-  it('resolves dynamic-unresolved with a literal targetRaw same as a static import', () => {
+  it('resolves dynamic-resolved (literal dynamic import) the same as a static import', () => {
     const parsed: ParsedImport = {
-      kind: 'dynamic-unresolved',
-      localName: '',
+      kind: 'dynamic-resolved',
       targetRaw: './a',
     };
     const result = resolveTsImportTarget(parsed, ctx('src/main.ts', ['src/main.ts', 'src/a.ts']));

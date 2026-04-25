@@ -18,12 +18,18 @@ import { buildMro, defaultLinearize } from '../../scope-resolution/passes/mro.js
 import { populateClassOwnedMembers } from '../../scope-resolution/scope/walkers.js';
 import type { ScopeResolver } from '../../scope-resolution/contract/scope-resolver.js';
 import { typescriptProvider } from '../typescript.js';
+import { loadTsconfigPaths, type TsconfigPaths } from '../../language-config.js';
 import {
   typescriptArityCompatibility,
   typescriptMergeBindings,
   resolveTsTarget,
   type TsResolveContext,
 } from './index.js';
+
+/** Shape the orchestrator threads in via `RunScopeResolutionInput.resolutionConfig`. */
+interface TypescriptResolutionConfig {
+  readonly tsconfigPaths: TsconfigPaths | null;
+}
 
 /**
  * Build a `resolveImportTarget` adapter that memoizes the workspace
@@ -45,7 +51,7 @@ function makeTsResolveImportTarget(): ScopeResolver['resolveImportTarget'] {
   let cachedNormalizedFileList: readonly string[] | null = null;
   let cachedResolveCache: Map<string, string | null> | null = null;
 
-  return (targetRaw, fromFile, allFilePaths) => {
+  return (targetRaw, fromFile, allFilePaths, resolutionConfig) => {
     if (cachedAllFilePaths !== allFilePaths) {
       cachedAllFilePaths = allFilePaths;
       cachedSet = new Set(allFilePaths);
@@ -54,12 +60,14 @@ function makeTsResolveImportTarget(): ScopeResolver['resolveImportTarget'] {
       cachedResolveCache = new Map();
     }
 
+    const cfg = resolutionConfig as TypescriptResolutionConfig | undefined;
     const ws: TsResolveContext = {
       fromFile,
       allFilePaths: cachedSet!,
       allFileList: cachedAllFileList!,
       normalizedFileList: cachedNormalizedFileList!,
       resolveCache: cachedResolveCache!,
+      tsconfigPaths: cfg?.tsconfigPaths ?? null,
     };
     return resolveTsTarget(targetRaw, ws);
   };
@@ -71,6 +79,14 @@ const typescriptScopeResolver: ScopeResolver = {
   importEdgeReason: 'typescript-scope: import',
 
   resolveImportTarget: makeTsResolveImportTarget(),
+
+  // Threaded into `resolveImportTarget` so tsconfig path aliases
+  // (`@/services/user`, `~/x`, …) resolve through the same standard
+  // resolver branch the legacy DAG uses. One I/O round-trip per
+  // workspace pass; the orchestrator awaits this once.
+  loadResolutionConfig: async (repoPath: string) => ({
+    tsconfigPaths: await loadTsconfigPaths(repoPath),
+  }),
 
   // TypeScript declaration merging + LEGB: local > import > wildcard,
   // separated by declaration space (value / type / namespace). The

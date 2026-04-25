@@ -354,22 +354,23 @@ function makeEdgeDraft(
 
   // Resolvable at the file level; intra-SCC fixpoint may still fail to fill
   // in `targetDefId` (e.g., symbol not exported from target). Side-effect
-  // imports are terminal at the file level — no `targetDefId` needed since
-  // they materialize no `BindingRef`. Pre-finalize them here so the
-  // fixpoint loop skips them entirely.
+  // and resolved-dynamic imports are terminal at the file level — no
+  // `targetDefId` needed since they materialize no `BindingRef`. Pre-
+  // finalize them here so the fixpoint loop skips them entirely.
   const base: ImportEdge = {
     localName: extractLocalName(parsed),
     targetFile,
     targetExportedName: extractExportedName(parsed),
     kind: edgeKindFor(parsed),
   };
+  const isFileLevelTerminal = parsed.kind === 'side-effect' || parsed.kind === 'dynamic-resolved';
   return {
     source: parsed,
     fromFile: file.filePath,
     fromScope: file.moduleScope,
     targetFile,
     base,
-    finalized: parsed.kind === 'side-effect' ? base : null,
+    finalized: isFileLevelTerminal ? base : null,
   };
 }
 
@@ -382,6 +383,7 @@ function extractLocalName(parsed: ParsedImport): string {
   switch (parsed.kind) {
     case 'wildcard':
     case 'side-effect':
+    case 'dynamic-resolved':
       return '';
     default:
       return parsed.localName;
@@ -397,6 +399,7 @@ function extractExportedName(parsed: ParsedImport): string {
       return parsed.importedName;
     case 'wildcard':
     case 'dynamic-unresolved':
+    case 'dynamic-resolved':
     case 'side-effect':
       return '';
   }

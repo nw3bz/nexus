@@ -70,6 +70,9 @@ interface ImportSpec {
   readonly alias?: string;
   /** Node to anchor the synthesized captures (for range + match provenance). */
   readonly atNode: SyntaxNode;
+  /** Set on `dynamic` kind imports when the argument is a string literal —
+   *  enables `interpretTsImport` to emit `dynamic-resolved`. */
+  readonly literalSource?: boolean;
 }
 
 /**
@@ -244,8 +247,20 @@ function splitReexport(stmtNode: SyntaxNode): CaptureMatch[] {
 
   // `export * as ns from './m'` — tree-sitter-typescript emits a
   // `namespace_export` child whose identifier is the local re-export
-  // name. We bind the namespace to the source module so that
-  // consumers of this module can reach `ns.X` via the target's exports.
+  // name. Two facts are emitted:
+  //
+  //   1. An `@import.statement` (kind `reexport-namespace`) so finalize
+  //      knows the barrel imports `./m` as `ns` (binds `ns` locally
+  //      inside the barrel for consumers like `barrel.ts` calling
+  //      `ns.X()`).
+  //   2. A synthetic `@declaration.namespace` so the central
+  //      scope-extractor adds a `Namespace` SymbolDefinition for `ns`
+  //      to the barrel's `localDefs`. Without this, downstream files
+  //      doing `import { ns } from './barrel'` cannot resolve `ns`:
+  //      `findExportByName` and `followReexportChain` only look at
+  //      `localDefs` / `reexport` / `wildcard` drafts, never at
+  //      `namespace`-kind imports. The synthetic declaration fixes that
+  //      without growing the shared finalizer's surface.
   const namespaceExport = findChild(stmtNode, 'namespace_export');
   if (namespaceExport !== null) {
     const aliasId = findChild(namespaceExport, 'identifier');
@@ -258,6 +273,7 @@ function splitReexport(stmtNode: SyntaxNode): CaptureMatch[] {
           alias: aliasId.text,
           atNode: namespaceExport,
         }),
+        buildNamespaceDeclarationMatch(namespaceExport, aliasId),
       ];
     }
   }
@@ -345,6 +361,7 @@ function splitDynamicImport(callNode: SyntaxNode): CaptureMatch[] {
         source,
         name: '',
         atNode: callNode,
+        literalSource: true,
       }),
     ];
   }
@@ -408,5 +425,22 @@ function buildImportMatch(stmtNode: SyntaxNode, spec: ImportSpec): CaptureMatch 
   if (spec.alias !== undefined) {
     m['@import.alias'] = syntheticCapture('@import.alias', spec.atNode, spec.alias);
   }
+  if (spec.literalSource === true) {
+    m['@import.literal'] = syntheticCapture('@import.literal', spec.atNode, '');
+  }
   return m;
+}
+
+/** Synthesize a `@declaration.namespace` match for `export * as ns from './m'`.
+ *  The central scope-extractor turns this into a `SymbolDefinition` of type
+ *  `Namespace` in the barrel's `localDefs`, which makes `findExportByName`
+ *  resolve `ns` for downstream `import { ns } from './barrel'` consumers. */
+function buildNamespaceDeclarationMatch(
+  namespaceExportNode: SyntaxNode,
+  aliasId: SyntaxNode,
+): CaptureMatch {
+  return {
+    '@declaration.namespace': nodeToCapture('@declaration.namespace', namespaceExportNode),
+    '@declaration.name': nodeToCapture('@declaration.name', aliasId),
+  };
 }

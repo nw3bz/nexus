@@ -271,12 +271,38 @@ export interface ScopeResolver {
    * resolvers that must distinguish "this module exists in the repo"
    * from "this module is external" (Python's fallback resolver, for
    * example).
+   *
+   * `resolutionConfig` is the opaque value returned by
+   * `loadResolutionConfig` (loaded once per workspace pass by the
+   * orchestrator). TypeScript uses this to thread `tsconfig.json` path
+   * aliases through to the standard resolver. Languages that don't
+   * need any extra config ignore the parameter.
    */
   resolveImportTarget(
     targetRaw: string,
     fromFile: string,
     allFilePaths: ReadonlySet<string>,
+    resolutionConfig?: unknown,
   ): string | null;
+
+  /**
+   * Optional one-shot loader for cross-file import-resolution config
+   * (e.g. tsconfig path aliases for TypeScript, go.mod paths for Go,
+   * composer.json autoload for PHP). The orchestrator calls this once
+   * per workspace pass with the repo root and threads the result into
+   * every subsequent `resolveImportTarget` call as the
+   * `resolutionConfig` parameter.
+   *
+   * Languages that don't need any per-workspace config leave this
+   * undefined; the orchestrator threads `undefined` to
+   * `resolveImportTarget` in that case. Returning `null` is also
+   * supported and equivalent to "no config available".
+   *
+   * May be sync or async — the orchestrator awaits the result. The
+   * shape is opaque to the orchestrator (`unknown`); the per-language
+   * `resolveImportTarget` casts it to the language's expected shape.
+   */
+  loadResolutionConfig?(repoPath: string): Promise<unknown> | unknown;
 
   /**
    * Per-scope binding-merge precedence. The shared finalize pass

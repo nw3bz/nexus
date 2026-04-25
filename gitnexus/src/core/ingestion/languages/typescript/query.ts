@@ -54,13 +54,26 @@
 import Parser from 'tree-sitter';
 import TS from 'tree-sitter-typescript';
 
-// tree-sitter-typescript exports both `typescript` and `tsx` grammars on the
-// default export. The package's `.d.ts` types the default export loosely; we
-// narrow at the use site. The `.typescript` grammar covers both `.ts` and
-// `.tsx` syntax for the scope-query purposes (we only consume structural
-// constructs, not JSX-specific nodes).
+// tree-sitter-typescript exports both `typescript` and `tsx` grammars on
+// the default export. The package's `.d.ts` types the default export
+// loosely; we narrow at the use site. The two grammars are NOT
+// interchangeable: feeding a `.tsx` source to the `typescript` grammar
+// mis-parses JSX as a sequence of less-than/greater-than expressions
+// and silently drops every capture inside JSX elements. We therefore
+// pick the grammar by file extension.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const TS_GRAMMAR = (TS as any).typescript as Parameters<Parser['setLanguage']>[0];
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const TSX_GRAMMAR = (TS as any).tsx as Parameters<Parser['setLanguage']>[0];
+
+/** True when the file should be parsed with the TSX grammar. The TSX
+ *  grammar is a superset of TypeScript that adds JSX productions; it
+ *  parses plain `.ts` files correctly too, but we keep `.ts` on the
+ *  `typescript` grammar so the parser cache stays small and so any
+ *  subtle TSX-only mis-parses don't bleed into non-TSX files. */
+function isTsxFile(filePath: string): boolean {
+  return filePath.endsWith('.tsx');
+}
 
 const TYPESCRIPT_SCOPE_QUERY = `
 ;; Scopes — module / namespace / class-likes / function-likes
@@ -710,20 +723,63 @@ const TYPESCRIPT_SCOPE_QUERY = `
   property: (property_identifier) @reference.name) @reference.read.member
 `;
 
-let _parser: Parser | null = null;
-let _query: Parser.Query | null = null;
+let _tsParser: Parser | null = null;
+let _tsxParser: Parser | null = null;
+let _tsQuery: Parser.Query | null = null;
+let _tsxQuery: Parser.Query | null = null;
 
-export function getTsParser(): Parser {
-  if (_parser === null) {
-    _parser = new Parser();
-    _parser.setLanguage(TS_GRAMMAR);
+/**
+ * Return the right tree-sitter parser for `filePath` (or the TS parser
+ * when no path is given — the legacy callsite shape).
+ */
+export function getTsParser(filePath?: string): Parser {
+  if (filePath !== undefined && isTsxFile(filePath)) {
+    if (_tsxParser === null) {
+      _tsxParser = new Parser();
+      _tsxParser.setLanguage(TSX_GRAMMAR);
+    }
+    return _tsxParser;
   }
-  return _parser;
+  if (_tsParser === null) {
+    _tsParser = new Parser();
+    _tsParser.setLanguage(TS_GRAMMAR);
+  }
+  return _tsParser;
 }
 
-export function getTsScopeQuery(): Parser.Query {
-  if (_query === null) {
-    _query = new Parser.Query(TS_GRAMMAR, TYPESCRIPT_SCOPE_QUERY);
+/**
+ * Return the right tree-sitter Query (compiled against the same grammar
+ * as the parser). A Query bound to the `typescript` grammar can NOT be
+ * executed against a Tree produced by the `tsx` grammar — tree-sitter
+ * matches by node-type id, and the two grammars have separate id
+ * spaces.
+ */
+export function getTsScopeQuery(filePath?: string): Parser.Query {
+  if (filePath !== undefined && isTsxFile(filePath)) {
+    if (_tsxQuery === null) {
+      _tsxQuery = new Parser.Query(TSX_GRAMMAR, TYPESCRIPT_SCOPE_QUERY);
+    }
+    return _tsxQuery;
   }
-  return _query;
+  if (_tsQuery === null) {
+    _tsQuery = new Parser.Query(TS_GRAMMAR, TYPESCRIPT_SCOPE_QUERY);
+  }
+  return _tsQuery;
+}
+
+/**
+ * Validate that a cached `Tree` was produced by the grammar matching
+ * `filePath` (TSX vs TypeScript). The runtime tree-sitter `Tree` exposes
+ * `getLanguage()` (returning the grammar object the parser was bound
+ * to); the .d.ts is incomplete, so we reach via a cast. Identity
+ * comparison against `TSX_GRAMMAR` / `TS_GRAMMAR` is exact: the same
+ * module instance produces both. If `getLanguage` is unavailable for
+ * any reason, return true to keep behavior backwards-compatible (the
+ * original code never validated grammar at all).
+ */
+export function tsCachedTreeMatchesGrammar(tree: unknown, filePath: string): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const lang = (tree as any)?.getLanguage?.();
+  if (lang === undefined || lang === null) return true;
+  return isTsxFile(filePath) ? lang === TSX_GRAMMAR : lang === TS_GRAMMAR;
 }

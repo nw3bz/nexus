@@ -33,7 +33,7 @@ import {
   type SyntaxNode,
 } from '../../utils/ast-helpers.js';
 import { splitImportStatement } from './import-decomposer.js';
-import { getTsParser, getTsScopeQuery } from './query.js';
+import { getTsParser, getTsScopeQuery, tsCachedTreeMatchesGrammar } from './query.js';
 import { recordCacheHit, recordCacheMiss } from './cache-stats.js';
 import { synthesizeTsReceiverBinding } from './receiver-binding.js';
 import { computeTsArityMetadata } from './arity-metadata.js';
@@ -97,22 +97,33 @@ function shouldEmitReadMember(memberNode: SyntaxNode): boolean {
 
 export function emitTsScopeCaptures(
   sourceText: string,
-  _filePath: string,
+  filePath: string,
   cachedTree?: unknown,
 ): readonly CaptureMatch[] {
   // Skip the parse when the caller (parse phase's scopeTreeCache) already
   // produced a Tree for this source. Cache miss = re-parse, same as before.
   // The cachedTree parameter is typed as `unknown` at the LanguageProvider
   // contract layer; cast here at the use site.
+  //
+  // Grammar selection: `.tsx` files are parsed with the TSX grammar,
+  // `.ts` files with the TypeScript grammar. The two grammars have
+  // separate node-type id spaces, so a Query compiled against one
+  // cannot match a Tree produced by the other. We validate the cached
+  // tree's grammar against the file extension and fall back to a
+  // fresh parse if they disagree (e.g. a worker-mode parse landed
+  // with the wrong grammar pinned).
   let tree = cachedTree as ReturnType<ReturnType<typeof getTsParser>['parse']> | undefined;
+  if (tree !== undefined && !tsCachedTreeMatchesGrammar(tree, filePath)) {
+    tree = undefined;
+  }
   if (tree === undefined) {
-    tree = getTsParser().parse(sourceText);
+    tree = getTsParser(filePath).parse(sourceText);
     recordCacheMiss();
   } else {
     recordCacheHit();
   }
 
-  const rawMatches = getTsScopeQuery().matches(tree.rootNode);
+  const rawMatches = getTsScopeQuery(filePath).matches(tree.rootNode);
   const out: CaptureMatch[] = [];
 
   for (const m of rawMatches) {

@@ -184,6 +184,27 @@ export type ParsedImport =
       readonly targetRaw: string | null;
     }
   /**
+   * Lazy / dynamic import whose target IS a static string literal at parse
+   * time, so it can be linked to a concrete `targetFile`. No local name
+   * binding is materialized — `import('./m')` returns `Promise<Module>` and
+   * any consumer-visible names appear via subsequent `.then(({ X }) => …)`
+   * destructuring, which is outside the static-import surface. The edge
+   * exists for module-reachability and impact analysis (so editing `./m`
+   * still flags the dynamic importer as affected).
+   *
+   * Providers MUST only emit this kind when `targetRaw` is a literal
+   * string they can hand to `resolveImportTarget`; expression arguments
+   * stay `dynamic-unresolved`.
+   *
+   * Examples:
+   *   - JS `import('./feature')`                  → `{ kind: 'dynamic-resolved', targetRaw: './feature' }`
+   *   - JS `await import('@scope/pkg/sub')`       → `{ kind: 'dynamic-resolved', targetRaw: '@scope/pkg/sub' }`
+   */
+  | {
+      readonly kind: 'dynamic-resolved';
+      readonly targetRaw: string;
+    }
+  /**
    * Bare-source / side-effect import that introduces no local name binding
    * but still establishes a file-level dependency. Resolves to a concrete
    * `targetFile` via `resolveImportTarget` and produces a file→file
@@ -269,6 +290,7 @@ export interface ImportEdge {
     | 'wildcard-expanded'
     | 'reexport'
     | 'dynamic-unresolved'
+    | 'dynamic-resolved'
     | 'side-effect';
   /** Re-export chain, for provenance (e.g., `['./y']` when re-exported via `./y`). */
   readonly transitiveVia?: readonly string[];

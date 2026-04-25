@@ -122,10 +122,16 @@ export function interpretTsImport(captures: CaptureMatch): ParsedImport | null {
       };
     }
     case 'dynamic': {
-      // `import('./m')` / `import(x)`. When the argument is a string
-      // literal, we have a resolvable `targetRaw`; when it's a runtime
-      // expression, we pass through the source text for diagnostics
-      // and finalize marks the edge unresolved.
+      // `import('./m')` / `import(x)`. The decomposer marks literal-
+      // string arguments with `@import.literal` so we can promote them
+      // to `dynamic-resolved` here — that lets the shared finalizer
+      // produce a file-level IMPORTS edge for lazy-loaded modules.
+      // Non-literal arguments stay `dynamic-unresolved` (target is
+      // runtime-computed and unreachable to the static finalizer).
+      const isLiteral = captures['@import.literal'] !== undefined;
+      if (isLiteral && sourceCap !== undefined) {
+        return { kind: 'dynamic-resolved', targetRaw: sourceCap.text };
+      }
       return {
         kind: 'dynamic-unresolved',
         localName: '',
