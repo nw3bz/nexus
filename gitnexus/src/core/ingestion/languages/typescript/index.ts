@@ -88,5 +88,5 @@ export { getTypescriptCaptureCacheStats, resetTypescriptCaptureCacheStats } from
 export { interpretTsImport, interpretTsTypeBinding } from './interpret.js';
 export { typescriptMergeBindings } from './merge-bindings.js';
 export { typescriptArityCompatibility } from './arity.js';
-export { resolveTsImportTarget, type TsResolveContext } from './import-target.js';
+export { resolveTsImportTarget, resolveTsTarget, type TsResolveContext } from './import-target.js';
 export { tsBindingScopeFor, tsImportOwningScope, tsReceiverBinding } from './simple-hooks.js';

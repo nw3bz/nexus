@@ -335,14 +335,11 @@ function makeEdgeDraft(
 
   // Edge is unresolvable at the file level — mark unresolved now.
   if (targetFile === null) {
-    const edgeKind = parsed.kind === 'wildcard' ? 'wildcard-expanded' : parsed.kind;
-    const localName = parsed.kind === 'wildcard' ? '' : parsed.localName;
-    const targetExportedName = extractExportedName(parsed);
     const base: ImportEdge = {
-      localName,
+      localName: extractLocalName(parsed),
       targetFile: null,
-      targetExportedName,
-      kind: edgeKind,
+      targetExportedName: extractExportedName(parsed),
+      kind: edgeKindFor(parsed),
       linkStatus: 'unresolved',
     };
     return {
@@ -356,15 +353,15 @@ function makeEdgeDraft(
   }
 
   // Resolvable at the file level; intra-SCC fixpoint may still fail to fill
-  // in `targetDefId` (e.g., symbol not exported from target).
-  const edgeKind = parsed.kind === 'wildcard' ? 'wildcard-expanded' : parsed.kind;
-  const localName = parsed.kind === 'wildcard' ? '' : parsed.localName;
-  const targetExportedName = extractExportedName(parsed);
+  // in `targetDefId` (e.g., symbol not exported from target). Side-effect
+  // imports are terminal at the file level — no `targetDefId` needed since
+  // they materialize no `BindingRef`. Pre-finalize them here so the
+  // fixpoint loop skips them entirely.
   const base: ImportEdge = {
-    localName,
+    localName: extractLocalName(parsed),
     targetFile,
-    targetExportedName,
-    kind: edgeKind,
+    targetExportedName: extractExportedName(parsed),
+    kind: edgeKindFor(parsed),
   };
   return {
     source: parsed,
@@ -372,8 +369,23 @@ function makeEdgeDraft(
     fromScope: file.moduleScope,
     targetFile,
     base,
-    finalized: null,
+    finalized: parsed.kind === 'side-effect' ? base : null,
   };
+}
+
+function edgeKindFor(parsed: ParsedImport): ImportEdge['kind'] {
+  if (parsed.kind === 'wildcard') return 'wildcard-expanded';
+  return parsed.kind;
+}
+
+function extractLocalName(parsed: ParsedImport): string {
+  switch (parsed.kind) {
+    case 'wildcard':
+    case 'side-effect':
+      return '';
+    default:
+      return parsed.localName;
+  }
 }
 
 function extractExportedName(parsed: ParsedImport): string {
@@ -385,6 +397,7 @@ function extractExportedName(parsed: ParsedImport): string {
       return parsed.importedName;
     case 'wildcard':
     case 'dynamic-unresolved':
+    case 'side-effect':
       return '';
   }
 }

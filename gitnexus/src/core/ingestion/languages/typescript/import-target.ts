@@ -42,22 +42,33 @@ export function resolveTsImportTarget(
   parsedImport: ParsedImport,
   workspaceIndex: WorkspaceIndex,
 ): string | null {
-  const ctx = workspaceIndex as TsResolveContext | undefined;
-  if (
-    ctx === undefined ||
-    typeof (ctx as { fromFile?: unknown }).fromFile !== 'string' ||
-    !((ctx as { allFilePaths?: unknown }).allFilePaths instanceof Set)
-  ) {
-    return null;
-  }
-  if (parsedImport.kind === 'dynamic-unresolved') {
-    // Dynamic imports carry `targetRaw` only for diagnostics; when
-    // the expression isn't a string literal we can't resolve a file.
-    if (parsedImport.targetRaw === null) return null;
-    // A string-literal dynamic import (`import('./m')`) resolves the
-    // same way as a static import, so we fall through.
-  }
+  const ctx = narrowTsContext(workspaceIndex);
+  if (ctx === null) return null;
+
+  // Dynamic imports carry `targetRaw` only for diagnostics; when the
+  // expression isn't a string literal we can't resolve a file.
+  // A string-literal dynamic import (`import('./m')`) resolves like a
+  // static import — fall through to the shared path resolver.
+  if (parsedImport.kind === 'dynamic-unresolved' && parsedImport.targetRaw === null) return null;
   if (parsedImport.targetRaw === null || parsedImport.targetRaw === '') return null;
+
+  return resolveTsTarget(parsedImport.targetRaw, ctx);
+}
+
+/**
+ * Resolve a raw module-path string to a workspace file path using the
+ * same standard-strategy resolver as the legacy DAG. Operates directly on
+ * the source string without requiring a `ParsedImport`, so the
+ * `ScopeResolver.resolveImportTarget` adapter doesn't need to construct
+ * a fake `ParsedImport` to reach the resolver.
+ *
+ * Returns `null` when:
+ *   - the context is malformed (missing `fromFile` / `allFilePaths`)
+ *   - `targetRaw` is empty
+ *   - the resolver finds no matching file
+ */
+export function resolveTsTarget(targetRaw: string, ctx: TsResolveContext): string | null {
+  if (targetRaw === '') return null;
 
   const language = ctx.language ?? SupportedLanguages.TypeScript;
   const allFileList = ctx.allFileList ?? Array.from(ctx.allFilePaths);
@@ -66,7 +77,7 @@ export function resolveTsImportTarget(
 
   return resolveImportPath(
     ctx.fromFile,
-    parsedImport.targetRaw,
+    targetRaw,
     ctx.allFilePaths,
     allFileList as string[],
     normalizedFileList as string[],
@@ -74,4 +85,16 @@ export function resolveTsImportTarget(
     language,
     ctx.tsconfigPaths ?? null,
   );
+}
+
+function narrowTsContext(workspaceIndex: WorkspaceIndex): TsResolveContext | null {
+  const ctx = workspaceIndex as TsResolveContext | undefined;
+  if (
+    ctx === undefined ||
+    typeof (ctx as { fromFile?: unknown }).fromFile !== 'string' ||
+    !((ctx as { allFilePaths?: unknown }).allFilePaths instanceof Set)
+  ) {
+    return null;
+  }
+  return ctx;
 }

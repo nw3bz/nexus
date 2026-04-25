@@ -21,32 +21,56 @@ import { typescriptProvider } from '../typescript.js';
 import {
   typescriptArityCompatibility,
   typescriptMergeBindings,
-  resolveTsImportTarget,
+  resolveTsTarget,
   type TsResolveContext,
 } from './index.js';
+
+/**
+ * Build a `resolveImportTarget` adapter that memoizes the workspace
+ * file list, the lower-cased file list, and the per-pass `resolveCache`
+ * across every import lookup in a single workspace pass. The
+ * orchestrator passes the same `ReadonlySet` reference for every call
+ * within a pass — we use that identity to detect when the workspace
+ * changes and recompute the derived state lazily.
+ *
+ * Without this memoization, `resolveTsTarget` re-derived
+ * `allFileList` and `normalizedFileList` (both O(N_files)) and threw
+ * away the `resolveCache` on every import — O(N_files × N_imports)
+ * total work for what should be O(N_files + N_imports).
+ */
+function makeTsResolveImportTarget(): ScopeResolver['resolveImportTarget'] {
+  let cachedAllFilePaths: ReadonlySet<string> | null = null;
+  let cachedSet: Set<string> | null = null;
+  let cachedAllFileList: readonly string[] | null = null;
+  let cachedNormalizedFileList: readonly string[] | null = null;
+  let cachedResolveCache: Map<string, string | null> | null = null;
+
+  return (targetRaw, fromFile, allFilePaths) => {
+    if (cachedAllFilePaths !== allFilePaths) {
+      cachedAllFilePaths = allFilePaths;
+      cachedSet = new Set(allFilePaths);
+      cachedAllFileList = Array.from(allFilePaths);
+      cachedNormalizedFileList = cachedAllFileList.map((f) => f.toLowerCase());
+      cachedResolveCache = new Map();
+    }
+
+    const ws: TsResolveContext = {
+      fromFile,
+      allFilePaths: cachedSet!,
+      allFileList: cachedAllFileList!,
+      normalizedFileList: cachedNormalizedFileList!,
+      resolveCache: cachedResolveCache!,
+    };
+    return resolveTsTarget(targetRaw, ws);
+  };
+}
 
 const typescriptScopeResolver: ScopeResolver = {
   language: SupportedLanguages.TypeScript,
   languageProvider: typescriptProvider,
   importEdgeReason: 'typescript-scope: import',
 
-  resolveImportTarget: (targetRaw, fromFile, allFilePaths) => {
-    // Copy the orchestrator's `ReadonlySet` into a `Set` because the
-    // underlying standard resolver is typed to receive `Set<string>`
-    // (it uses the set to scan candidate resolutions). O(N) copy
-    // once per import — cost is trivial next to parsing.
-    const ws: TsResolveContext = {
-      fromFile,
-      allFilePaths: new Set(allFilePaths),
-      // tsconfigPaths / pre-normalized lists would be populated by the
-      // orchestrator when available; absent here we let the adapter
-      // derive them on the fly.
-    };
-    return resolveTsImportTarget(
-      { kind: 'named', localName: '_', importedName: '_', targetRaw },
-      ws,
-    );
-  },
+  resolveImportTarget: makeTsResolveImportTarget(),
 
   // TypeScript declaration merging + LEGB: local > import > wildcard,
   // separated by declaration space (value / type / namespace). The

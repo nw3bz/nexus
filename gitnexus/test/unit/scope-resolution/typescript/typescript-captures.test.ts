@@ -230,7 +230,7 @@ describe('emitTsScopeCaptures — imports (decomposed)', () => {
     // `import { A } from './a'`          → 1 match (named)
     // `import B from './b'`              → 1 match (default)
     // `import * as ns from './ns'`       → 1 match (namespace)
-    // `import './polyfill'`              → 0 matches (side-effect; no local binding)
+    // `import './polyfill'`              → 1 match (side-effect; file-level edge only)
     const src = `
       import { A } from './a';
       import B from './b';
@@ -238,7 +238,7 @@ describe('emitTsScopeCaptures — imports (decomposed)', () => {
       import './polyfill';
     `;
     const count = countMatches(src, (t) => t.includes('@import.statement'));
-    expect(count).toBe(3);
+    expect(count).toBe(4);
 
     // Each has the corresponding @import.kind marker.
     const kinds = tagsFor(src)
@@ -247,7 +247,7 @@ describe('emitTsScopeCaptures — imports (decomposed)', () => {
         const idx = tags.findIndex((t) => t === '@import.kind');
         return idx >= 0 ? tags[idx] : null;
       });
-    expect(kinds).toHaveLength(3);
+    expect(kinds).toHaveLength(4);
   });
 
   it('decomposes multi-specifier imports into one match per name', () => {

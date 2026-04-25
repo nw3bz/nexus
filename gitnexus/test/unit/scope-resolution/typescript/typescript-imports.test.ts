@@ -122,9 +122,13 @@ describe('interpretTsImport — static imports', () => {
     expect((ns as { importedName: string }).importedName).toBe('./m');
   });
 
-  it('side-effect: `import "./polyfill"` emits nothing (no local binding)', () => {
+  it('side-effect: `import "./polyfill"` emits a side-effect ParsedImport (no local binding)', () => {
     const imps = importsFor('import "./polyfill";');
-    expect(imps).toHaveLength(0);
+    expect(imps).toHaveLength(1);
+    expect(imps[0]).toEqual({
+      kind: 'side-effect',
+      targetRaw: './polyfill',
+    });
   });
 
   it('preserves the module path as written (no quote stripping leftovers)', () => {

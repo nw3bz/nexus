@@ -182,6 +182,21 @@ export type ParsedImport =
       readonly localName: string;
       /** Source text of the unresolved expression when available; `null` otherwise. */
       readonly targetRaw: string | null;
+    }
+  /**
+   * Bare-source / side-effect import that introduces no local name binding
+   * but still establishes a file-level dependency. Resolves to a concrete
+   * `targetFile` via `resolveImportTarget` and produces a file→file
+   * `ImportEdge` for module-reachability and impact analysis, with no
+   * `BindingRef` materialized.
+   *
+   * Examples:
+   *   - JS / TS `import './polyfill'`        → `{ kind: 'side-effect', targetRaw: './polyfill' }`
+   *   - Rust    `use foo::bar as _`          → side-effect (binding hidden under `_`)
+   */
+  | {
+      readonly kind: 'side-effect';
+      readonly targetRaw: string;
     };
 
 /**
@@ -253,7 +268,8 @@ export interface ImportEdge {
     | 'namespace'
     | 'wildcard-expanded'
     | 'reexport'
-    | 'dynamic-unresolved';
+    | 'dynamic-unresolved'
+    | 'side-effect';
   /** Re-export chain, for provenance (e.g., `['./y']` when re-exported via `./y`). */
   readonly transitiveVia?: readonly string[];
   /** Set to `'unresolved'` when the SCC fixpoint could not link this edge. */

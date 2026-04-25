@@ -31,10 +31,11 @@
  * TypeScript scope-resolution layer, types and values share the same
  * lookup; runtime-emission is a downstream concern.
  *
- * Side-effect imports (`import './polyfill'`) produce NO decomposed
- * match — there is no local binding to resolve and the finalize
- * algorithm has no ParsedImport variant for bare-source edges. The
- * caller drops the raw anchor.
+ * Side-effect imports (`import './polyfill'`) produce a single match
+ * with `kind: 'side-effect'`. The shared finalize algorithm resolves
+ * the target file and emits a file-level IMPORTS edge, but
+ * materializes no `BindingRef` (matching the legacy DAG, which counts
+ * `import './polyfill'` as a module-reachability dependency only).
  */
 
 import type { Capture, CaptureMatch } from 'gitnexus-shared';
@@ -54,7 +55,8 @@ type ImportKind =
   | 'reexport-alias'
   | 'reexport-wildcard'
   | 'reexport-namespace'
-  | 'dynamic';
+  | 'dynamic'
+  | 'side-effect';
 
 interface ImportSpec {
   readonly kind: ImportKind;
@@ -73,11 +75,9 @@ interface ImportSpec {
 /**
  * Decompose an import anchor. Handles three node types:
  *
- *   - `import_statement`             : all static import forms
+ *   - `import_statement`             : all static import forms (incl. side-effect)
  *   - `export_statement` (w/ source) : re-exports
  *   - `call_expression` (import fn)  : dynamic `import()`
- *
- * Returns `[]` for side-effect imports (no local binding).
  */
 export function splitImportStatement(stmtNode: SyntaxNode): CaptureMatch[] {
   if (stmtNode.type === 'import_statement') return splitImport(stmtNode);
@@ -101,8 +101,17 @@ function splitImport(stmtNode: SyntaxNode): CaptureMatch[] {
 
   const importClause = findChild(stmtNode, 'import_clause');
   if (importClause === null) {
-    // `import './polyfill'` — no clause, no local binding. Drop it.
-    return [];
+    // `import './polyfill'` — no clause, no local binding. Emit a
+    // side-effect match so the finalize layer still produces a
+    // file-level IMPORTS edge (parity with the legacy DAG).
+    return [
+      buildImportMatch(stmtNode, {
+        kind: 'side-effect',
+        source,
+        name: '',
+        atNode: stmtNode,
+      }),
+    ];
   }
 
   const out: CaptureMatch[] = [];

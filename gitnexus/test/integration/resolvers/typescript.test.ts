@@ -360,6 +360,45 @@ describe('TypeScript named import disambiguation', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Side-effect imports: `import './polyfill'` produces an IMPORTS edge but
+// no local binding (parity with the legacy DAG, which counts side-effect
+// imports as module-reachability dependencies).
+//
+// This describe runs under both `REGISTRY_PRIMARY_TYPESCRIPT=0` (legacy
+// DAG) and `=1` (registry-primary) via the CI parity gate
+// (`.github/workflows/ci-scope-parity.yml`). Both modes must emit the
+// same IMPORTS edges; the registry-primary path emits no extra
+// `BindingRef`s for the side-effect kind.
+// ---------------------------------------------------------------------------
+
+describe('TypeScript side-effect imports', () => {
+  let result: PipelineResult;
+
+  beforeAll(async () => {
+    result = await runPipelineFromRepo(
+      path.join(FIXTURES, 'typescript-side-effect-imports'),
+      () => {},
+    );
+  }, 60000);
+
+  it('emits IMPORTS edges for both side-effect imports + the named import', () => {
+    const imports = getRelationships(result, 'IMPORTS').filter((e) => e.source === 'app.ts');
+    const targets = imports.map((e) => e.targetFilePath).sort();
+    expect(targets).toEqual(['src/greeter.ts', 'src/polyfill.ts', 'src/register.ts']);
+  });
+
+  it('does not synthesize local bindings for side-effect imports', () => {
+    // A side-effect import binds no local name; nothing in `app.ts` should
+    // try to call into `polyfill.ts` or `register.ts`. The only resolved
+    // CALL edge from `main` is to `greet` in `greeter.ts`.
+    const calls = getRelationships(result, 'CALLS').filter((c) => c.source === 'main');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].target).toBe('greet');
+    expect(calls[0].targetFilePath).toBe('src/greeter.ts');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Alias import resolution: import { User as U } resolves U → User
 // ---------------------------------------------------------------------------
 

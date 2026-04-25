@@ -132,6 +132,13 @@ export function interpretTsImport(captures: CaptureMatch): ParsedImport | null {
         targetRaw: sourceCap?.text ?? null,
       };
     }
+    case 'side-effect': {
+      // `import './polyfill'` — bare-source, no local binding. The
+      // finalize layer resolves to a target file and emits a
+      // file-level IMPORTS edge; no `BindingRef` is materialized.
+      if (sourceCap === undefined) return null;
+      return { kind: 'side-effect', targetRaw: sourceCap.text };
+    }
     default:
       return null;
   }
