@@ -2,9 +2,10 @@
  * Unit tests for `finalize` (RFC #909 Ring 2 SHARED #915).
  *
  * Covers: acyclic chain · single-SCC cycle · multi-SCC · wildcard
- * expansion · re-export flattening · dynamic-unresolved passthrough ·
- * bounded fixpoint cap · module-scope binding materialization · unresolved
- * target · external target · provider `mergeBindings` precedence.
+ * expansion · re-export flattening · dynamic import passthrough/linking ·
+ * side-effect imports · bounded fixpoint cap · module-scope binding
+ * materialization · unresolved target · external target · provider
+ * `mergeBindings` precedence.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -103,6 +104,13 @@ const dynamic = (localName: string, targetRaw: string | null): ParsedImport => (
   targetRaw,
 });
 
+const dynamicResolved = (targetRaw: string): ParsedImport => ({
+  kind: 'dynamic-resolved',
+  targetRaw,
+});
+
+const sideEffect = (targetRaw: string): ParsedImport => ({ kind: 'side-effect', targetRaw });
+
 const firstImport = (out: ReturnType<typeof finalize>, scope: ScopeId) => {
   const imports = out.imports.get(scope);
   return imports?.[0];
@@ -170,6 +178,39 @@ describe('finalize', () => {
       expect(edge.kind).toBe('dynamic-unresolved');
       expect(edge.targetFile).toBeNull();
       expect(edge.linkStatus).toBeUndefined();
+    });
+
+    it('links dynamic-resolved imports as file-level edges without bindings', () => {
+      const feature = file('feature', [def('def:feature.Feature', 'Class', 'feature.Feature')]);
+      const app = file('app', [], [dynamicResolved('feature')]);
+      const files = [app, feature];
+      const out = finalize({ files, workspaceIndex: undefined }, defaultHooks(files));
+
+      const edge = firstImport(out, app.moduleScope)!;
+      expect(edge.kind).toBe('dynamic-resolved');
+      expect(edge.targetFile).toBe('feature');
+      expect(edge.linkStatus).toBeUndefined();
+      expect(edge.targetDefId).toBeUndefined();
+      expect(bindingsFor(out, app.moduleScope, 'Feature')).toEqual([]);
+      expect(out.stats.linkedEdges).toBe(1);
+    });
+
+    it('links side-effect imports as file-level edges without bindings', () => {
+      const polyfill = file('polyfill', [
+        def('def:polyfill.install', 'Function', 'polyfill.install'),
+      ]);
+      const app = file('app', [], [sideEffect('polyfill')]);
+      const files = [app, polyfill];
+      const out = finalize({ files, workspaceIndex: undefined }, defaultHooks(files));
+
+      const edge = firstImport(out, app.moduleScope)!;
+      expect(edge.kind).toBe('side-effect');
+      expect(edge.localName).toBe('');
+      expect(edge.targetFile).toBe('polyfill');
+      expect(edge.linkStatus).toBeUndefined();
+      expect(edge.targetDefId).toBeUndefined();
+      expect(bindingsFor(out, app.moduleScope, 'install')).toEqual([]);
+      expect(out.stats.linkedEdges).toBe(1);
     });
   });
 
@@ -448,6 +489,21 @@ describe('finalize', () => {
       // test must be updated alongside the multi-binding propagation
       // pass that mirrors typeBindings (which also uses first-wins).
       expect(edge.targetDefId).toBe('def:c.X');
+    });
+
+    it('keeps first-wins precedence stable through cyclic shadowing', () => {
+      const c = file('c', [def('def:c.X', 'Class', 'c.X')]);
+      const d = file('d', [def('def:d.X', 'Class', 'd.X')]);
+      const a = file('a', [], [reexport('X', 'X', 'b'), reexport('X', 'X', 'd')]);
+      const b = file('b', [], [reexport('X', 'X', 'a'), reexport('X', 'X', 'c')]);
+      const consumer = file('consumer', [], [named('X', 'X', 'a')]);
+      const files = [consumer, a, b, c, d];
+      const out = finalize({ files, workspaceIndex: undefined }, defaultHooks(files));
+
+      const edge = firstImport(out, consumer.moduleScope)!;
+      expect(edge.linkStatus).toBeUndefined();
+      expect(edge.targetDefId).toBe('def:c.X');
+      expect(edge.transitiveVia).toEqual(['a', 'b', 'c']);
     });
   });
 

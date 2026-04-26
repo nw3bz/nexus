@@ -24,7 +24,7 @@
  *   - `reexport-alias`     : `export { X as Y } from './m'` → reexport (with alias)
  *   - `reexport-wildcard`  : `export * from './m'`          → wildcard
  *   - `reexport-namespace` : `export * as ns from './m'`    → namespace (local=ns,imported=source)
- *   - `dynamic`            : `import('./m')` / `import(x)`  → dynamic-unresolved
+ *   - `dynamic`            : `import('./m')` / `import(x)`  → dynamic-resolved or dynamic-unresolved
  *
  * Type-only constructs (`import type { X }`, `import { type X }`,
  * `export type { X }`) emit the same kinds as runtime forms — at the
@@ -97,8 +97,8 @@ function splitImport(stmtNode: SyntaxNode): CaptureMatch[] {
   //   string                                (side-effect `import './m'`)
   //
   // The `source` field is the string literal — we strip its surrounding
-  // quotes.  An import without an `import_clause` child is side-effect
-  // only and produces no decomposed matches.
+  // quotes. An import without an `import_clause` child is side-effect
+  // only and still emits one non-binding match.
   const source = extractSource(stmtNode);
   if (source === null) return [];
 

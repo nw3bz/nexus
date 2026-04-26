@@ -148,9 +148,8 @@ export function emitTsScopeCaptures(
     // Decompose each `import_statement` / re-export `export_statement`
     // so `interpretTsImport` sees the kind/source/name/alias markers
     // it consumes. The raw query anchor carries only @import.statement.
-    // Side-effect imports (`import './polyfill'`) decompose to `[]` —
-    // we drop them entirely; there is no local binding to resolve and
-    // ParsedImport has no side-effect variant.
+    // Side-effect imports emit a non-binding marker so finalize can keep
+    // the file-level dependency.
     if (grouped['@import.statement'] !== undefined) {
       const stmtCapture = grouped['@import.statement'];
       const stmtNode =
@@ -160,8 +159,8 @@ export function emitTsScopeCaptures(
         const decomposed = splitImportStatement(stmtNode);
         for (const d of decomposed) out.push(d);
       }
-      // If decomposition yielded nothing (side-effect import, bare
-      // anchor with no clause), drop the match. Emitting a bare
+      // If decomposition yielded nothing (malformed/bare anchor), drop
+      // the match. Emitting a bare
       // @import.statement without kind/source would confuse the
       // central extractor.
       continue;

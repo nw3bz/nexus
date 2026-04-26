@@ -26,9 +26,9 @@
  * (`resolveImportTarget`, `expandsWildcardTo`, `mergeBindings`) that
  * match the LanguageProvider surface from #911.
  *
- * **Dynamic imports rule.** `kind === 'dynamic-unresolved'` passes through
- * as an `ImportEdge { kind: 'dynamic-unresolved', targetFile: null }`
- * with no `BindingRef`. They are parse-time signals, not linkable targets.
+ * **Non-binding imports rule.** `dynamic-unresolved` passes through with
+ * `targetFile: null`; `dynamic-resolved` and `side-effect` resolve to
+ * file-level `ImportEdge`s. None of these materialize `BindingRef`s.
  */
 
 import type { SymbolDefinition } from './symbol-definition.js';
@@ -549,6 +549,11 @@ type FileReexportClosure = ReadonlyMap<string, ReexportClosureEntry>;
  *     SCC. For tree-shaped barrel graphs (the common case) it
  *     collapses to O(E_re) total.
  *   * Per-edge lookup at finalize time: O(1).
+ *   * `transitiveVia` preserves the exact file path chain for diagnostics
+ *     and graph provenance. Building those arrays copies the inherited path,
+ *     which is O(depth²) in a pathological single-name barrel chain; practical
+ *     TypeScript barrel chains are shallow enough that we keep exact paths
+ *     instead of capping or summarizing them.
  *   * Pathological deep chains that previously needed
  *     `MAX_REEXPORT_DEPTH=100` to bound stack growth now resolve
  *     in full and are bounded only by available memory — the

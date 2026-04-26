@@ -60,7 +60,7 @@ import { SupportedLanguages } from 'gitnexus-shared';
  * Add a language here ONLY after shadow parity ≥ 99% fixtures / ≥ 98%
  * corpus per RFC §6.4. TypeScript is temporarily accepted under the
  * Ring 3 CI parity gate while corpus-level shadow-mode wiring is tracked
- * separately for this migration.
+ * in #927 for this migration.
  *
  * The set is intentionally a static TypeScript literal (not a JSON import,
  * not an env lookup) so CI can discover it via `tsx` without a build step

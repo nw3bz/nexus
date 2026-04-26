@@ -223,8 +223,8 @@ describe('Cross-File Binding Propagation: TypeScript E3 return type propagation'
 // ---------------------------------------------------------------------------
 // Circular imports: a.ts ↔ b.ts
 // a.ts imports getB from b.ts; b.ts imports A from a.ts
-// Conservative expectation: pipeline completes without error.
-// Cross-file binding propagation across cycles is not guaranteed.
+// Regression guard: the pipeline completes and still resolves the
+// imported factory plus the inferred receiver binding for b.doB().
 // ---------------------------------------------------------------------------
 
 describe('Cross-File Binding Propagation: TypeScript circular imports', () => {
@@ -265,6 +265,18 @@ describe('Cross-File Binding Propagation: TypeScript circular imports', () => {
     expect(paths.some((p) => p.includes('a.ts') && p.includes('b.ts'))).toBe(true);
     // b.ts imports from a.ts
     expect(paths.some((p) => p.includes('b.ts') && p.includes('a.ts'))).toBe(true);
+  });
+
+  it('resolves processA through imported getB and inferred B.doB binding', () => {
+    const calls = getRelationships(result, 'CALLS');
+    const getBCall = calls.find((c) => c.source === 'processA' && c.target === 'getB');
+    expect(getBCall).toBeDefined();
+    expect(getBCall!.targetFilePath).toBe('src/b.ts');
+
+    const doBCall = calls.find((c) => c.source === 'processA' && c.target === 'doB');
+    expect(doBCall).toBeDefined();
+    expect(doBCall!.targetLabel).toBe('Method');
+    expect(doBCall!.targetFilePath).toBe('src/b.ts');
   });
 });
 
