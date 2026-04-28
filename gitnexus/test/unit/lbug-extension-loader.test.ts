@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   ExtensionManager,
   getExtensionInstallChildProcessArgs,
+  getExtensionInstallPolicy,
   getExtensionInstallTimeoutMs,
   type ExtensionInstallResult,
 } from '../../src/core/lbug/extension-loader.js';
@@ -48,6 +49,51 @@ describe('ExtensionManager — LOAD-first behavior', () => {
 });
 
 describe('ExtensionManager — install policies', () => {
+  it('defaults to load-only so analyze does not require network access', async () => {
+    const original = process.env.GITNEXUS_LBUG_EXTENSION_INSTALL;
+    delete process.env.GITNEXUS_LBUG_EXTENSION_INSTALL;
+
+    try {
+      const installExtension = vi.fn();
+      const manager = new ExtensionManager({ installExtension, warn: noopWarn });
+      const query = vi.fn().mockRejectedValue(new Error('Extension "vector" not found'));
+
+      expect(getExtensionInstallPolicy()).toBe('load-only');
+      await expect(manager.ensure(query, 'vector', 'VECTOR')).resolves.toBe(false);
+      expect(installExtension).not.toHaveBeenCalled();
+    } finally {
+      if (original === undefined) {
+        delete process.env.GITNEXUS_LBUG_EXTENSION_INSTALL;
+      } else {
+        process.env.GITNEXUS_LBUG_EXTENSION_INSTALL = original;
+      }
+    }
+  });
+
+  it('allows explicit opt-in to automatic extension installation', async () => {
+    const original = process.env.GITNEXUS_LBUG_EXTENSION_INSTALL;
+    process.env.GITNEXUS_LBUG_EXTENSION_INSTALL = 'auto';
+
+    try {
+      const installExtension = vi.fn().mockResolvedValue(okInstall);
+      const manager = new ExtensionManager({ installExtension, warn: noopWarn });
+      const query = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('Extension "vector" not found'))
+        .mockResolvedValueOnce({});
+
+      expect(getExtensionInstallPolicy()).toBe('auto');
+      await expect(manager.ensure(query, 'vector', 'VECTOR')).resolves.toBe(true);
+      expect(installExtension).toHaveBeenCalledOnce();
+    } finally {
+      if (original === undefined) {
+        delete process.env.GITNEXUS_LBUG_EXTENSION_INSTALL;
+      } else {
+        process.env.GITNEXUS_LBUG_EXTENSION_INSTALL = original;
+      }
+    }
+  });
+
   it('runs bounded out-of-process INSTALL and retries LOAD when policy=auto', async () => {
     const installExtension = vi.fn().mockResolvedValue(okInstall);
     const manager = new ExtensionManager({ policy: 'auto', installExtension });

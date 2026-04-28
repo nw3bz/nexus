@@ -13,7 +13,7 @@
  * directly through the MCP Server's handler dispatch.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { createMCPServer } from '../../src/mcp/server.js';
+import { createMCPServer, normalizeMcpShutdownExitCode } from '../../src/mcp/server.js';
 
 // ─── Mock backend ──────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ describe('getNextStepHint (via tool call response)', () => {
     const backend = createMockBackend({
       callTool: vi.fn().mockResolvedValue({ processes: [], definitions: [] }),
     });
-    const server = createMCPServer(backend);
+    const _server = createMCPServer(backend);
 
     // We can't easily call handlers directly on the MCP Server,
     // so we verify the handler was registered by creating the server without error.
@@ -87,6 +87,18 @@ describe('server error handling', () => {
     const server = createMCPServer(backend);
     // Server was created with version from package.json — no crash
     expect(server).toBeDefined();
+  });
+});
+
+describe('MCP shutdown exit code normalization', () => {
+  it('maps termination signals to numeric process exit codes', () => {
+    expect(normalizeMcpShutdownExitCode('SIGINT')).toBe(130);
+    expect(normalizeMcpShutdownExitCode('SIGTERM')).toBe(143);
+  });
+
+  it('preserves explicit numeric exit codes', () => {
+    expect(normalizeMcpShutdownExitCode()).toBe(0);
+    expect(normalizeMcpShutdownExitCode(1)).toBe(1);
   });
 });
 

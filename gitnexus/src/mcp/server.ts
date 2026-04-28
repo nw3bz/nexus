@@ -28,6 +28,18 @@ import { realStdoutWrite } from './core/lbug-adapter.js';
 import type { LocalBackend } from './local/local-backend.js';
 import { getResourceDefinitions, getResourceTemplates, readResource } from './resources.js';
 
+const SIGNAL_EXIT_CODES: Partial<Record<NodeJS.Signals, number>> = {
+  SIGINT: 130,
+  SIGTERM: 143,
+};
+
+export const normalizeMcpShutdownExitCode = (
+  reason: number | NodeJS.Signals | undefined = 0,
+): number => {
+  if (typeof reason === 'number') return reason;
+  return SIGNAL_EXIT_CODES[reason] ?? 1;
+};
+
 /**
  * Next-step hints appended to tool responses.
  *
@@ -301,7 +313,7 @@ export async function startMCPServer(backend: LocalBackend): Promise<void> {
 
   // Graceful shutdown helper
   let shuttingDown = false;
-  const shutdown = async (exitCode = 0) => {
+  const shutdown = async (reason: number | NodeJS.Signals = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
     try {
@@ -310,12 +322,12 @@ export async function startMCPServer(backend: LocalBackend): Promise<void> {
     try {
       await server.close();
     } catch {}
-    process.exit(exitCode);
+    process.exit(normalizeMcpShutdownExitCode(reason));
   };
 
   // Handle graceful shutdown
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
   // Log crashes to stderr so they aren't silently lost.
   // uncaughtException is fatal — shut down.

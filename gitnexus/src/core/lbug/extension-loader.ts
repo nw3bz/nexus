@@ -8,9 +8,9 @@ const EXTENSION_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
  * Lifecycle policy for an optional DuckDB extension.
  *
  * - `auto`     — try `LOAD`, fall back to one bounded out-of-process `INSTALL`
- *                attempt per process if `LOAD` fails. Default for analyze.
+ *                attempt per process if `LOAD` fails. Opt-in for online setup.
  * - `load-only`— try `LOAD` only; never spawn an installer. Used by serve/MCP
- *                read paths so user queries never block on a network install.
+ *                read paths and the default offline-first behavior.
  * - `never`    — skip the extension entirely. Operators can use this to
  *                forcibly disable optional search features.
  */
@@ -51,8 +51,10 @@ const alreadyAvailable = (message: string): boolean =>
 const resolvePolicyFromEnv = (): ExtensionInstallPolicy => {
   const raw = process.env.GITNEXUS_LBUG_EXTENSION_INSTALL;
   if (raw === 'load-only' || raw === 'never' || raw === 'auto') return raw;
-  return 'auto';
+  return 'load-only';
 };
+
+export const getExtensionInstallPolicy = (): ExtensionInstallPolicy => resolvePolicyFromEnv();
 
 export const getExtensionInstallTimeoutMs = (): number => {
   const raw = process.env.GITNEXUS_LBUG_EXTENSION_INSTALL_TIMEOUT_MS;
@@ -143,7 +145,7 @@ export const installDuckDbExtensionOutOfProcess = async (
  * subsequent analyze or query calls.
  *
  * Policy precedence (most specific wins):
- *   per-call `opts.policy` → constructor `options.policy` → env → `auto`
+ *   per-call `opts.policy` → constructor `options.policy` → env → `load-only`
  */
 export class ExtensionManager {
   private readonly capabilities = new Map<string, ExtensionCapability>();
