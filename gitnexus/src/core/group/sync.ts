@@ -7,11 +7,13 @@ import type { GroupConfig, RepoHandle, RepoSnapshot, StoredContract, CrossLink }
 import { HttpRouteExtractor } from './extractors/http-route-extractor.js';
 import { GrpcExtractor } from './extractors/grpc-extractor.js';
 import { TopicExtractor } from './extractors/topic-extractor.js';
+import { IncludeExtractor } from './extractors/include-extractor.js';
 import { ManifestExtractor } from './extractors/manifest-extractor.js';
 import { runExactMatch } from './matching.js';
 import { detectServiceBoundaries, assignService } from './service-boundary-detector.js';
 import type { CypherExecutor } from './contract-extractor.js';
 import { writeContractRegistry } from './storage.js';
+import { writeBridge } from './bridge-db.js';
 import type { ContractRegistry } from './types.js';
 
 export interface SyncOptions {
@@ -94,6 +96,7 @@ export async function syncGroup(config: GroupConfig, opts?: SyncOptions): Promis
     const httpEx = new HttpRouteExtractor();
     const grpcEx = new GrpcExtractor();
     const topicEx = new TopicExtractor();
+    const includeEx = new IncludeExtractor();
     dbExecutors = new Map<string, CypherExecutor>();
     const openPoolIds: string[] = [];
 
@@ -142,6 +145,17 @@ export async function syncGroup(config: GroupConfig, opts?: SyncOptions): Promis
 
           if (config.detect.topics) {
             const extracted = await topicEx.extract(executor, handle.repoPath, handle);
+            for (const c of extracted) {
+              autoContracts.push({
+                ...c,
+                repo: groupPath,
+                service: assignService(c.symbolRef.filePath, boundaries),
+              });
+            }
+          }
+
+          if (config.detect.includes) {
+            const extracted = await includeEx.extract(executor, handle.repoPath, handle);
             for (const c of extracted) {
               autoContracts.push({
                 ...c,
@@ -228,6 +242,12 @@ export async function syncGroup(config: GroupConfig, opts?: SyncOptions): Promis
 
   if (opts?.groupDir && !opts.skipWrite) {
     await writeContractRegistry(opts.groupDir, registry);
+    await writeBridge(opts.groupDir, {
+      contracts: allContracts,
+      crossLinks,
+      repoSnapshots,
+      missingRepos,
+    });
   }
 
   return {
