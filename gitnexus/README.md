@@ -153,6 +153,10 @@ gitnexus setup                   # Configure MCP for your editors (one-time)
 gitnexus analyze [path]          # Index a repository (or update stale index)
 gitnexus analyze --force         # Force full re-index
 gitnexus analyze --embeddings    # Enable embedding generation (slower, better search)
+gitnexus analyze --embedding-threads 2      # Limit local ONNX CPU threads
+gitnexus analyze --embedding-batch-size 8   # Tune node batch size for embeddings
+gitnexus analyze --embedding-sub-batch-size 4  # Tune chunks per model call
+gitnexus analyze --embedding-device cpu     # Select auto, cpu, dml, cuda, or wasm
 gitnexus analyze --skip-agents-md  # Preserve custom AGENTS.md/CLAUDE.md gitnexus section edits
 gitnexus analyze --verbose       # Log skipped files when parsers are unavailable
 gitnexus analyze --max-file-size 1024  # Skip files larger than N KB (default: 512, cap: 32768)
@@ -162,6 +166,7 @@ gitnexus serve                   # Start local HTTP server (multi-repo) for web 
 gitnexus index                   # Register an existing .gitnexus/ folder into the global registry
 gitnexus list                    # List all indexed repositories
 gitnexus status                  # Show index status for current repo
+gitnexus doctor                  # Show platform capabilities and embedding/runtime config
 gitnexus clean                   # Delete index for current repo
 gitnexus clean --all --force     # Delete all indexes
 gitnexus wiki [path]             # Generate LLM-powered docs from knowledge graph
@@ -298,20 +303,21 @@ npm install -g gitnexus
 
 ### Analyze warns about unavailable FTS or VECTOR extensions
 
-GitNexus uses optional DuckDB extensions for BM25 and vector search. The `gitnexus serve` and MCP read paths only ever try to `LOAD` the extensions — they never block on a network install. The `analyze` command, by default, attempts one bounded out-of-process `INSTALL` if `LOAD` fails and proceeds even when that install times out, so the index is always written to disk; BM25/vector search degrade gracefully until the extensions become available.
+GitNexus uses optional DuckDB extensions for BM25 and vector search. The `gitnexus serve` and MCP read paths only ever try to `LOAD` the extensions — they never block on a network install. The `analyze` command is also offline-first by default: it tries to load already-installed extensions and continues when they are unavailable, so the index is still written to disk; BM25/vector search degrade gracefully until the extensions become available. Use `gitnexus doctor` to inspect the active policy and semantic-search mode.
 
 Configure the behavior with two environment variables:
 
 | Variable | Values | Default | Effect |
 |----------|--------|---------|--------|
-| `GITNEXUS_LBUG_EXTENSION_INSTALL` | `auto`, `load-only`, `never` | `auto` | `auto` runs one bounded INSTALL if LOAD fails. `load-only` only uses already-installed extensions (recommended for offline / firewalled environments). `never` skips optional extensions entirely. |
+| `GITNEXUS_LBUG_EXTENSION_INSTALL` | `auto`, `load-only`, `never` | `load-only` | `load-only` only uses already-installed extensions and never reaches the network. `auto` opts into one bounded INSTALL if LOAD fails. `never` skips optional extensions entirely. |
 | `GITNEXUS_LBUG_EXTENSION_INSTALL_TIMEOUT_MS` | positive integer | `15000` | Wall-clock budget for the out-of-process `INSTALL` child before it is killed. |
 
 ```bash
 # Offline/airgapped: never reach the network for extensions
 GITNEXUS_LBUG_EXTENSION_INSTALL=load-only npx gitnexus analyze
 
-# Slow network: give extension downloads more time
+# Online setup: opt into extension downloads and give them more time
+GITNEXUS_LBUG_EXTENSION_INSTALL=auto npx gitnexus analyze
 GITNEXUS_LBUG_EXTENSION_INSTALL_TIMEOUT_MS=30000 npx gitnexus analyze
 ```
 

@@ -192,16 +192,22 @@ gitnexus setup                   # Configure MCP for your editors (one-time)
 gitnexus analyze [path]          # Index a repository (or update stale index)
 gitnexus analyze --force         # Force full re-index
 gitnexus analyze --skills        # Generate repo-specific skill files from detected communities
-gitnexus analyze --skip-embeddings  # Skip embedding generation (faster)
 gitnexus analyze --skip-agents-md  # Preserve custom AGENTS.md/CLAUDE.md gitnexus section edits
 gitnexus analyze --skip-git        # Index folders that are not Git repositories
 gitnexus analyze --embeddings    # Enable embedding generation (slower, better search)
+gitnexus analyze --embedding-threads 2      # Limit local ONNX CPU threads
+gitnexus analyze --embedding-batch-size 8   # Tune node batch size for embeddings
+gitnexus analyze --embedding-sub-batch-size 4  # Tune chunks per model call
+gitnexus analyze --embedding-device cpu     # Select auto, cpu, dml, cuda, or wasm
 gitnexus analyze --verbose       # Log skipped files when parsers are unavailable
+gitnexus analyze --max-file-size 1024  # Skip files larger than N KB (default: 512, cap: 32768)
 gitnexus analyze --worker-timeout 60  # Increase worker idle timeout for slow parses
 gitnexus mcp                     # Start MCP server (stdio) — serves all indexed repos
 gitnexus serve                   # Start local HTTP server (multi-repo) for web UI connection
+gitnexus index                   # Register an existing .gitnexus/ folder into the global registry
 gitnexus list                    # List all indexed repositories
 gitnexus status                  # Show index status for current repo
+gitnexus doctor                  # Show platform capabilities and embedding/runtime config
 gitnexus clean                   # Delete index for current repo
 gitnexus clean --all --force     # Delete all indexes
 gitnexus wiki [path]             # Generate repository wiki from knowledge graph
@@ -219,7 +225,9 @@ gitnexus group query <name> <q>  # Search execution flows across all repos in a 
 gitnexus group status <name>     # Check staleness of repos in a group
 ```
 
-If `analyze` reports a worker parse timeout on a large or unusual repository, it keeps running and falls back safely. To give slow worker jobs more time, use `gitnexus analyze --worker-timeout 60` or set `GITNEXUS_WORKER_SUB_BATCH_TIMEOUT_MS=60000`. For very large files, `GITNEXUS_WORKER_SUB_BATCH_MAX_BYTES` controls the worker job byte budget.
+If `analyze` reports a worker parse timeout on a large or unusual repository, it keeps running and falls back safely. To give slow worker jobs more time, use `gitnexus analyze --worker-timeout 60` or set `GITNEXUS_WORKER_SUB_BATCH_TIMEOUT_MS=60000`. For very large files, `gitnexus analyze --max-file-size 2048` and `GITNEXUS_WORKER_SUB_BATCH_MAX_BYTES` control file and worker job size limits.
+
+Optional LadybugDB extensions are offline-first by default. GitNexus only loads extensions that are already available unless you opt into downloads with `GITNEXUS_LBUG_EXTENSION_INSTALL=auto`; use `gitnexus doctor` to see the active extension policy and semantic-search mode.
 
 ### What Your AI Agent Gets
 
@@ -750,7 +758,7 @@ The wiki generator reads the indexed graph structure, groups files into modules 
 
 ## Security & Privacy
 
-- **CLI**: Everything runs locally on your machine. No network calls. Index stored in `.gitnexus/` (gitignored). Global registry at `~/.gitnexus/` stores only paths and metadata.
+- **CLI**: Everything runs locally on your machine. By default, indexing does not require outbound network access; optional LadybugDB extension downloads are opt-in via `GITNEXUS_LBUG_EXTENSION_INSTALL=auto`. Index stored in `.gitnexus/` (gitignored). Global registry at `~/.gitnexus/` stores only paths and metadata.
 - **Web**: Everything runs in your browser. No code uploaded to any server. API keys stored in localStorage only.
 - Open source — audit the code yourself.
 
