@@ -1,6 +1,6 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import lbug from '@ladybugdb/core';
 import type { LbugValue } from '@ladybugdb/core';
 import type { BridgeHandle, BridgeMeta, StoredContract, CrossLink, RepoSnapshot } from './types.js';
@@ -276,16 +276,22 @@ export async function retryRename(src: string, dst: string, attempts = 3): Promi
 
 export async function writeBridgeMeta(groupDir: string, meta: BridgeMeta): Promise<void> {
   const target = path.join(groupDir, 'meta.json');
-  // Unpredictable suffix + exclusive-create flag closes the symlink/pre-
-  // create attack window CodeQL js/insecure-temporary-file flagged on the
-  // prior `${target}.tmp.${Date.now()}` shape.
-  const tmp = `${target}.tmp.${randomBytes(8).toString('hex')}`;
-  await fsp.writeFile(tmp, JSON.stringify(meta, null, 2), { encoding: 'utf-8', flag: 'wx' });
-  // Use retryRename for consistency with writeBridge's atomic swap — on
-  // Windows a concurrent reader can cause EBUSY/EPERM even on a tiny
-  // meta.json, and we don't want meta write to be less robust than the
-  // bridge.lbug swap it accompanies.
-  await retryRename(tmp, target);
+  // Stage inside a unique mkdtemp directory — the canonical CodeQL-
+  // recognized sanitizer for js/insecure-temporary-file. The previous
+  // shape (`${target}.tmp.${randomBytes()}` + `flag: 'wx'`) was
+  // semantically equivalent but not on the analyzer's recognized list
+  // and re-fired the alert. mkdtemp is anchored inside groupDir so the
+  // rename stays on the same filesystem (no EXDEV).
+  const stagingDir = await fsp.mkdtemp(path.join(groupDir, 'meta-tmp-'));
+  try {
+    const stagingPath = path.join(stagingDir, 'meta.json');
+    await fsp.writeFile(stagingPath, JSON.stringify(meta, null, 2), 'utf-8');
+    // retryRename handles transient EBUSY/EPERM on Windows for the same
+    // reason writeBridge does — concurrent readers can lock meta.json.
+    await retryRename(stagingPath, target);
+  } finally {
+    await fsp.rm(stagingDir, { recursive: true, force: true });
+  }
 }
 
 export async function readBridgeMeta(groupDir: string): Promise<BridgeMeta> {
@@ -707,18 +713,21 @@ export async function openBridgeDbReadOnly(groupDir: string): Promise<BridgeHand
     }
   }
   if (process.env.GITNEXUS_DEBUG_BRIDGE) {
-    // Sanitize the error message before logging — closes CodeQL
-    // js/log-injection. Without the CRLF strip an attacker who can
-    // influence the underlying lbug error (e.g. via a crafted db path
-    // that ends up in stderr) can inject fake log lines.
-    const sanitizedErr = (lastErr instanceof Error ? lastErr.message : String(lastErr)).replace(
-      /[\r\n]/g,
-      ' ',
-    );
-    const sanitizedDir = String(groupDir).replace(/[\r\n]/g, ' ');
+    // Sanitize log values via JSON.stringify — the CodeQL-recognized
+    // sanitizer for js/log-injection (CWE-117). The previous shape
+    // (`.replace(/[\r\n]/g, ' ')`) closed the obvious CR/LF vector but
+    // wasn't on the analyzer's recognized-sanitizer list and re-fired
+    // the alert. JSON.stringify escapes CR, LF, quotes, backslashes, AND
+    // C0 control characters (including ANSI escape sequences) to their
+    // \\uXXXX form. The .slice(1, -1) removes the wrapping quotes for
+    // readable inline log context.
+    const safeMsg = JSON.stringify(
+      lastErr instanceof Error ? lastErr.message : String(lastErr),
+    ).slice(1, -1);
+    const safeDir = JSON.stringify(String(groupDir)).slice(1, -1);
     console.warn(
-      `[bridge-db] openBridgeDbReadOnly(${sanitizedDir}) gave up after ` +
-        `${LBUG_OPEN_RETRY_ATTEMPTS} attempts: ${sanitizedErr}`,
+      `[bridge-db] openBridgeDbReadOnly(${safeDir}) gave up after ` +
+        `${LBUG_OPEN_RETRY_ATTEMPTS} attempts: ${safeMsg}`,
     );
   }
   return null;

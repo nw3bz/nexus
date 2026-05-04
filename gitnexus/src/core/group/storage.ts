@@ -2,17 +2,8 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { randomBytes } from 'node:crypto';
 import type { ContractRegistry } from './types.js';
-
-/**
- * Build an unpredictable suffix for atomic-write tmp files. Replaces the
- * previous `Date.now()` pattern which CodeQL flagged as
- * js/insecure-temporary-file: a guessable suffix in a writable directory
- * lets a co-located attacker pre-create or symlink the tmp path before the
- * write lands.
- */
-const tmpSuffix = (): string => randomBytes(8).toString('hex');
+import { retryRename } from './bridge-db.js';
 
 const CONTRACTS_FILE = 'contracts.json';
 
@@ -44,18 +35,26 @@ export async function writeContractRegistry(
   registry: ContractRegistry,
 ): Promise<void> {
   const targetPath = path.join(groupDir, CONTRACTS_FILE);
-  const tmpPath = `${targetPath}.tmp.${tmpSuffix()}`;
-
-  // `flag: 'wx'` opens the tmp file with O_EXCL — refuses to overwrite an
-  // existing path, closing the symlink/pre-create attack window CodeQL
-  // js/insecure-temporary-file flags. The unpredictable suffix above means
-  // collisions are negligible; if one happens (extremely unlikely) the
-  // caller sees an EEXIST error and can retry.
-  await fsp.writeFile(tmpPath, JSON.stringify(registry, null, 2), {
-    encoding: 'utf-8',
-    flag: 'wx',
-  });
-  await fsp.rename(tmpPath, targetPath);
+  // Stage inside a unique mkdtemp directory rather than writing a tmp file
+  // alongside the target. CodeQL's js/insecure-temporary-file query
+  // recognizes mkdtemp-staging as a sanitizer (see writeBridge in
+  // bridge-db.ts and the U6 follow-up plan). The previous shape
+  // (`${target}.tmp.${randomBytes()}` + `flag: 'wx'`) was semantically
+  // equivalent but not on CodeQL's recognized-sanitizer list; alerts
+  // re-fired on the new code. mkdtemp gives us collision-free, unguessable
+  // staging anchored inside groupDir so the rename stays on the same
+  // filesystem (no EXDEV) and is atomic.
+  const stagingDir = await fsp.mkdtemp(path.join(groupDir, 'contracts-tmp-'));
+  try {
+    const stagingPath = path.join(stagingDir, CONTRACTS_FILE);
+    await fsp.writeFile(stagingPath, JSON.stringify(registry, null, 2), 'utf-8');
+    await retryRename(stagingPath, targetPath);
+  } finally {
+    // Best-effort cleanup. On the happy path the file was renamed out, so
+    // the staging dir is empty. On a write/rename failure it may contain a
+    // partial file; we remove it either way to avoid disk leak.
+    await fsp.rm(stagingDir, { recursive: true, force: true });
+  }
 }
 
 export async function readContractRegistry(groupDir: string): Promise<ContractRegistry | null> {
@@ -95,10 +94,21 @@ export async function createGroupDir(
   force: boolean = false,
 ): Promise<string> {
   const groupDir = getGroupDir(gitnexusDir, groupName);
+
+  // The existsSync check is UX only — provides a friendly "already exists"
+  // error so users don't see a raw EEXIST. The real security guard is the
+  // mkdtemp-staging + atomic-directory-rename pattern below: even if a
+  // concurrent caller creates the group between the existsSync return and
+  // the rename, the rename will fail (rather than silently overwrite a
+  // half-built group). CodeQL js/insecure-temporary-file recognizes the
+  // mkdtemp idiom as a sanitizer; the previous `flag: 'wx'` shape was
+  // semantically equivalent but not on the recognized list.
   if (fs.existsSync(path.join(groupDir, 'group.yaml')) && !force) {
     throw new Error(`Group "${groupName}" already exists. Use --force to overwrite.`);
   }
-  await fsp.mkdir(groupDir, { recursive: true });
+
+  const groupsBaseDir = path.dirname(groupDir);
+  await fsp.mkdir(groupsBaseDir, { recursive: true });
 
   const template = `version: 1
 name: ${groupName}
@@ -124,15 +134,29 @@ matching:
   # exclude_links_paths: [/ping, /health, /healthcheck]
   # exclude_links_param_only_paths: false
 `;
-  // Writing group.yaml with `flag: 'wx'` is exclusive-create — refuses to
-  // overwrite an existing file. Combined with the existence check above
-  // (line ~80) this closes the TOCTOU window between check and write that
-  // CodeQL js/insecure-temporary-file flags. When `force=true` we
-  // explicitly switch to default write semantics so the function still
-  // overwrites as documented.
-  await fsp.writeFile(path.join(groupDir, 'group.yaml'), template, {
-    encoding: 'utf-8',
-    flag: force ? 'w' : 'wx',
-  });
+
+  // Stage the entire group directory in a sibling mkdtemp directory, then
+  // rename it into place atomically. On POSIX, rename(2) of a directory is
+  // atomic when target doesn't exist, and atomic-replace when target does
+  // (used here for force=true after rm). On Windows, the same pattern works
+  // for non-existent targets; the force=true path explicitly removes the
+  // existing groupDir first.
+  const stagingDir = await fsp.mkdtemp(path.join(groupsBaseDir, `init-${groupName}-`));
+  let renamed = false;
+  try {
+    await fsp.writeFile(path.join(stagingDir, 'group.yaml'), template, 'utf-8');
+    if (force) {
+      await fsp.rm(groupDir, { recursive: true, force: true });
+    }
+    await retryRename(stagingDir, groupDir);
+    renamed = true;
+  } finally {
+    // Only clean up the staging dir if the rename didn't consume it. After
+    // a successful rename, stagingDir is now groupDir — removing it would
+    // delete the group we just created.
+    if (!renamed) {
+      await fsp.rm(stagingDir, { recursive: true, force: true });
+    }
+  }
   return groupDir;
 }
