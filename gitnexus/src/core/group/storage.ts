@@ -2,7 +2,17 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { randomBytes } from 'node:crypto';
 import type { ContractRegistry } from './types.js';
+
+/**
+ * Build an unpredictable suffix for atomic-write tmp files. Replaces the
+ * previous `Date.now()` pattern which CodeQL flagged as
+ * js/insecure-temporary-file: a guessable suffix in a writable directory
+ * lets a co-located attacker pre-create or symlink the tmp path before the
+ * write lands.
+ */
+const tmpSuffix = (): string => randomBytes(8).toString('hex');
 
 const CONTRACTS_FILE = 'contracts.json';
 
@@ -34,9 +44,17 @@ export async function writeContractRegistry(
   registry: ContractRegistry,
 ): Promise<void> {
   const targetPath = path.join(groupDir, CONTRACTS_FILE);
-  const tmpPath = `${targetPath}.tmp.${Date.now()}`;
+  const tmpPath = `${targetPath}.tmp.${tmpSuffix()}`;
 
-  await fsp.writeFile(tmpPath, JSON.stringify(registry, null, 2), 'utf-8');
+  // `flag: 'wx'` opens the tmp file with O_EXCL — refuses to overwrite an
+  // existing path, closing the symlink/pre-create attack window CodeQL
+  // js/insecure-temporary-file flags. The unpredictable suffix above means
+  // collisions are negligible; if one happens (extremely unlikely) the
+  // caller sees an EEXIST error and can retry.
+  await fsp.writeFile(tmpPath, JSON.stringify(registry, null, 2), {
+    encoding: 'utf-8',
+    flag: 'wx',
+  });
   await fsp.rename(tmpPath, targetPath);
 }
 
@@ -106,6 +124,15 @@ matching:
   # exclude_links_paths: [/ping, /health, /healthcheck]
   # exclude_links_param_only_paths: false
 `;
-  await fsp.writeFile(path.join(groupDir, 'group.yaml'), template, 'utf-8');
+  // Writing group.yaml with `flag: 'wx'` is exclusive-create — refuses to
+  // overwrite an existing file. Combined with the existence check above
+  // (line ~80) this closes the TOCTOU window between check and write that
+  // CodeQL js/insecure-temporary-file flags. When `force=true` we
+  // explicitly switch to default write semantics so the function still
+  // overwrites as documented.
+  await fsp.writeFile(path.join(groupDir, 'group.yaml'), template, {
+    encoding: 'utf-8',
+    flag: force ? 'w' : 'wx',
+  });
   return groupDir;
 }
