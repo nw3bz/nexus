@@ -294,6 +294,14 @@ const ensureLbugInitialized = async (dbPath: string) => {
 const doInitLbug = async (dbPath: string) => {
   // Different database requested — close the old one first
   if (conn || db) {
+    // CHECKPOINT before close so WAL contents are flushed into the main
+    // database file (mirrors the closeLbug() contract; same LadybugDB
+    // 0.16.0 WAL-flush issue on Windows applies here).
+    try {
+      if (conn) await conn.query('CHECKPOINT');
+    } catch {
+      /* ignore */
+    }
     try {
       if (conn) await conn.close();
     } catch {}
@@ -1049,6 +1057,18 @@ export const fetchExistingEmbeddingHashes = async (
 
 export const closeLbug = async (): Promise<void> => {
   if (conn) {
+    // CHECKPOINT before close so WAL contents are flushed into the main
+    // database file. Without this, LadybugDB 0.16.0's non-blocking
+    // checkpoint thread can outlive the close call and leave sidecar pages
+    // pending on disk, which makes a subsequent read-side open race with
+    // the WAL replay or trip the database-id check — triggering the
+    // UNREACHABLE_CODE assertion seen on Windows after analyze --embeddings.
+    // CHECKPOINT is a no-op when nothing is pending, so it's always safe.
+    try {
+      await conn.query('CHECKPOINT');
+    } catch {
+      /* ignore — older LadybugDB or in-memory DB may not accept it */
+    }
     try {
       await conn.close();
     } catch {}
