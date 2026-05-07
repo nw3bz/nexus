@@ -280,6 +280,7 @@ export class ManifestExtractor {
            ORDER BY f.filePath ASC
            LIMIT 1`,
           { contract: link.contract },
+        );
       } else if (link.type === 'custom') {
         // Workspace extractors produce qualified contracts like "mathlex::Expression".
         // Graph nodes store the unqualified symbol name ("Expression"), so strip
