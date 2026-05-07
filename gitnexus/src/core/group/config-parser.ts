@@ -4,16 +4,18 @@ import type { GroupConfig, GroupManifestLink, ContractType, ContractRole } from 
 const _require = createRequire(import.meta.url);
 const yaml = _require('js-yaml') as typeof import('js-yaml');
 
-const VALID_CONTRACT_TYPES: ContractType[] = ['http', 'grpc', 'topic', 'lib', 'custom', 'include'];
+const VALID_CONTRACT_TYPES: ContractType[] = ['http', 'grpc', 'thrift', 'topic', 'lib', 'custom', 'include'];
 const VALID_ROLES: ContractRole[] = ['provider', 'consumer'];
 
 const DEFAULT_DETECT = {
   http: true,
   grpc: true,
+  thrift: true,
   topics: true,
   shared_libs: true,
   embedding_fallback: true,
   includes: true,
+  workspace_deps: false,
 };
 
 const DEFAULT_MATCHING = {
