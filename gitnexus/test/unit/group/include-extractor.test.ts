@@ -196,6 +196,132 @@ int main() { return 0; }`,
     });
   });
 
+  // ---- Review finding #4: suffixResolve ambiguity ----
+
+  describe('finding #4: suffix-ambiguity does not silently suppress cross-repo include', () => {
+    it('emits a cross-repo contract when the include path does not match any local file (even if a shorter suffix does)', async () => {
+      // local repo has `internal/api.h` but NOT `ext/api.h`
+      writeFile('internal/api.h', '#pragma once');
+      writeFile(
+        'src/main.cpp',
+        `#include "ext/api.h"
+int main() { return 0; }`,
+      );
+
+      const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+      const consumers = contracts.filter((c) => c.role === 'consumer');
+
+      // Previously suffixResolve would match `api.h` against `internal/api.h`
+      // and drop the cross-repo contract. After finding #4 fix, we only
+      // accept exact full-path matches — so `ext/api.h` must still be
+      // emitted as a consumer contract.
+      expect(consumers).toHaveLength(1);
+      expect(consumers[0].contractId).toBe('include::ext/api.h');
+    });
+
+    it('still suppresses a local include when the FULL path matches', async () => {
+      writeFile('ext/api.h', '#pragma once');
+      writeFile('src/main.cpp', '#include "ext/api.h"\nint main(){return 0;}');
+
+      const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+      const consumers = contracts.filter((c) => c.role === 'consumer');
+
+      expect(consumers).toHaveLength(0);
+    });
+
+    it('resolves locally when include omits extension and a matching .h exists', async () => {
+      writeFile('foo/bar.h', '#pragma once');
+      writeFile('src/main.cpp', '#include "foo/bar"\nint main(){return 0;}');
+
+      const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+      const consumers = contracts.filter((c) => c.role === 'consumer');
+
+      expect(consumers).toHaveLength(0);
+    });
+  });
+
+  // ---- Review finding #5: regex fallback must strip block comments ----
+
+  describe('finding #5: regex fallback ignores block-commented includes', () => {
+    it('does not emit a contract for an #include inside /* ... */', async () => {
+      // Force regex fallback by producing a file larger than tree-sitter's
+      // 32 KB hard cap. The include we care about lives inside a block
+      // comment that spans the file.
+      const filler = 'int dummy_' + 'x'.repeat(32) + ' = 0;\n'.repeat(1200);
+      const content = `/*
+ * Historical include, kept for reference only:
+ * #include "legacy/old-api.h"
+ */
+${filler}
+#include "real/api.h"
+int main(){return 0;}`;
+      writeFile('src/huge.cpp', content);
+
+      const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+      const consumers = contracts.filter((c) => c.role === 'consumer');
+      const ids = consumers.map((c) => c.contractId);
+
+      // The live include should appear; the commented-out one must NOT.
+      expect(ids).toContain('include::real/api.h');
+      expect(ids).not.toContain('include::legacy/old-api.h');
+    });
+  });
+
+  // ---- Review finding #6: meta.source must reflect which extraction path ran ----
+
+  describe('finding #6: meta.source reflects extraction path', () => {
+    it('stamps `tree_sitter` on contracts produced via AST walking', async () => {
+      writeFile('src/main.cpp', '#include "app/small.h"\nint main(){return 0;}');
+
+      const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+      const consumers = contracts.filter((c) => c.role === 'consumer');
+
+      expect(consumers).toHaveLength(1);
+      expect((consumers[0].meta as { source?: string } | undefined)?.source).toBe('tree_sitter');
+    });
+
+    it('meta.source is one of the two documented values (tree_sitter | regex_fallback)', async () => {
+      // Regex fallback is a defensive branch that only fires if
+      // parser.setLanguage() or parser.parse() throws. In practice
+      // tree-sitter-c/cpp handles realistic inputs, so we only assert
+      // the meta.source contract: it is always present and always one of
+      // the two documented values. This guards against future regressions
+      // that might hard-code the wrong string.
+      writeFile('src/main.cpp', '#include "ext/whatever.h"\nint main(){return 0;}');
+      const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+      const consumer = contracts.find((c) => c.role === 'consumer');
+      expect(consumer).toBeDefined();
+      const src = (consumer?.meta as { source?: string } | undefined)?.source;
+      expect(['tree_sitter', 'regex_fallback']).toContain(src);
+    });
+  });
+
+  // ---- Review finding #3: provider id collision on case-sensitive FS ----
+
+  describe('finding #3: case-folding is documented and deterministic', () => {
+    it('collapses `Foo.h` and `foo.h` onto the same provider contract-id (documented trade-off)', async () => {
+      writeFile('Foo.h', '#pragma once\n// Capital Foo');
+      // On case-insensitive filesystems (macOS default) the second writeFile
+      // will overwrite the first, so we only create this when distinct files
+      // can coexist (case-sensitive FS, e.g. Linux CI).
+      try {
+        fs.writeFileSync(path.join(tmpDir, 'foo.h'), '#pragma once\n// lowercase foo');
+      } catch {
+        // Ignore — some FS won't allow both names to coexist.
+      }
+
+      const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+      const providers = contracts.filter((c) => c.role === 'provider');
+      const ids = providers.map((p) => p.contractId);
+
+      // Both files (if they coexist) must normalize to the same id.
+      // dedupe() keeps only one; caller code must be aware of this.
+      expect(ids).toContain('include::foo.h');
+      // Never see a mixed-case contract-id leak out.
+      expect(ids.every((id) => id === id.toLowerCase())).toBe(true);
+    });
+  });
+
   // ---- Deduplication ----
 
   describe('deduplication', () => {

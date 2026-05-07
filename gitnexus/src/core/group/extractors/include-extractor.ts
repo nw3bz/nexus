@@ -6,11 +6,7 @@ import Cpp from 'tree-sitter-cpp';
 import type { ContractExtractor, CypherExecutor } from '../contract-extractor.js';
 import type { ExtractedContract, RepoHandle } from '../types.js';
 import { readSafe } from './fs-utils.js';
-import {
-  buildSuffixIndex,
-  suffixResolve,
-  type SuffixIndex,
-} from '../../ingestion/import-resolvers/utils.js';
+import { buildSuffixIndex, type SuffixIndex } from '../../ingestion/import-resolvers/utils.js';
 
 /**
  * Cross-repo C/C++ `#include` dependency extractor.
@@ -211,8 +207,32 @@ const INCLUDE_REGEX = /^[ \t]*#\s*include\s*"([^"]+)"/gm;
 
 // ---------- helpers ----------
 
+/**
+ * Normalize an include path to a canonical lowercase forward-slash form.
+ *
+ * IMPORTANT — case-folding caveat (PR #1156 review finding #3):
+ *   Header paths are lowercased so consumer `#include "Foo/Bar.h"` and
+ *   provider file `Foo/Bar.h` normalize to the same contract-id. This is
+ *   the right trade-off on case-insensitive filesystems (macOS, Windows)
+ *   but on case-sensitive Linux filesystems two distinct headers `Foo.h`
+ *   and `foo.h` in the same repo will collide onto the same provider
+ *   contract-id; only one survives `dedupe()`. The gain (reliable
+ *   cross-platform matching) outweighs the cost (extremely rare header
+ *   casing collisions inside a single repo).
+ */
 function normalizeIncludePath(raw: string): string {
   return raw.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+/g, '/').toLowerCase();
+}
+
+/**
+ * Strip C/C++ block comments from a source blob. Used only by the
+ * regex-fallback path to avoid emitting consumer contracts for
+ * commented-out #include directives. Line comments (`// …`) cannot hide
+ * #include directives because the regex anchors on start-of-line.
+ * See PR #1156 review finding #5.
+ */
+function stripBlockComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '');
 }
 
 function isAngleBracketInclude(rawNodeText: string): boolean {
@@ -248,6 +268,31 @@ function getLanguageForFile(filePath: string): unknown | null {
     default:
       return null;
   }
+}
+
+/**
+ * Check whether an include path resolves to a file inside the local repo.
+ *
+ * Uses *exact full-path* matching on the suffix index — we never accept a
+ * truncated suffix match. For `#include "foo/bar.h"` this checks:
+ *   (a) a file whose path ends with the full `foo/bar.h`
+ *   (b) if the include omitted the extension, a file whose path ends with
+ *       the include + one of the C/C++ header extensions
+ *
+ * Returns `true` when a local file matches — caller should suppress the
+ * cross-repo consumer contract.
+ *
+ * See PR #1156 review finding #4 (suffixResolve ambiguity).
+ */
+function isLocalInclude(cleaned: string, suffixIndex: SuffixIndex): boolean {
+  const candidates = [cleaned];
+  if (!/\.[a-zA-Z0-9]+$/.test(cleaned)) {
+    for (const ext of ['.h', '.hpp', '.hxx', '.hh']) candidates.push(cleaned + ext);
+  }
+  for (const c of candidates) {
+    if (suffixIndex.get(c) || suffixIndex.getInsensitive(c)) return true;
+  }
+  return false;
 }
 
 // ---------- main class ----------
@@ -379,8 +424,11 @@ export class IncludeExtractor implements ContractExtractor {
         }
       }
 
-      // Collect raw include paths: tree-sitter first, regex fallback for large files
+      // Collect raw include paths: tree-sitter first, regex fallback for large files.
+      // `extractionSource` is stamped on each emitted consumer contract so
+      // regex-fallback contracts stay auditable post-hoc (PR #1156 review finding #6).
       let rawIncludes: string[];
+      let extractionSource: 'tree_sitter' | 'regex_fallback';
       try {
         parser.setLanguage(lang);
         const tree = parser.parse(content);
@@ -391,6 +439,7 @@ export class IncludeExtractor implements ContractExtractor {
           matches = [];
         }
         rawIncludes = [];
+        extractionSource = 'tree_sitter';
         for (const match of matches) {
           const sourceNode = match.captures.find((c) => c.name === 'import.source');
           if (!sourceNode) continue;
@@ -400,11 +449,15 @@ export class IncludeExtractor implements ContractExtractor {
           if (cleaned && cleaned.length <= 2048) rawIncludes.push(cleaned);
         }
       } catch {
-        // tree-sitter failed (e.g. file > 32 KB) — fall back to regex
+        // tree-sitter failed (e.g. file > 32 KB) — fall back to regex.
+        // Strip block comments first so we don't emit a consumer contract
+        // for a commented-out #include (PR #1156 review finding #5).
         rawIncludes = [];
+        extractionSource = 'regex_fallback';
+        const scanTarget = stripBlockComments(content);
         INCLUDE_REGEX.lastIndex = 0;
         let m: RegExpExecArray | null;
-        while ((m = INCLUDE_REGEX.exec(content)) !== null) {
+        while ((m = INCLUDE_REGEX.exec(scanTarget)) !== null) {
           if (m[1] && m[1].length <= 2048) rawIncludes.push(m[1]);
         }
       }
@@ -413,10 +466,16 @@ export class IncludeExtractor implements ContractExtractor {
         // Filter: skip known system headers and system path prefixes
         if (isSystemHeader(cleaned)) continue;
 
-        // Local resolution: try to resolve against this repo's own files
-        const pathParts = cleaned.split('/').filter(Boolean);
-        const resolved = suffixResolve(pathParts, normalizedFiles, allFiles, suffixIndex);
-        if (resolved !== null) continue; // Local include — not cross-repo
+        // Local resolution (PR #1156 review finding #4): only accept an
+        // exact-suffix match on the *full* include path. The generic
+        // suffixResolve() iterates all truncated suffixes, which would
+        // silently suppress a cross-repo `#include "map/base/view.h"`
+        // when the local repo has any `internal/view.h` — a realistic
+        // false-negative in large C++ codebases. Here we only resolve
+        // locally if a file path ends with the complete include string
+        // (optionally re-appending one of the C/C++ header extensions
+        // when the include already omits it).
+        if (isLocalInclude(cleaned, suffixIndex)) continue;
 
         // Unresolved: emit as consumer contract
         const normalizedRel = rel.replace(/\\/g, '/');
@@ -429,7 +488,7 @@ export class IncludeExtractor implements ContractExtractor {
           symbolName: cleaned,
           confidence: 0.85,
           meta: {
-            source: 'tree_sitter',
+            source: extractionSource,
             includePath: cleaned,
           },
         });
