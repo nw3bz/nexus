@@ -32,7 +32,6 @@ import {
 
 const HEADER_EXTENSIONS = new Set(['.h', '.hpp', '.hxx', '.hh']);
 
-const HEADER_GLOB = '**/*.{h,hpp,hxx,hh}';
 const SOURCE_GLOB = '**/*.{c,cpp,cc,cxx,h,hpp,hxx,hh}';
 
 const STANDARD_IGNORES = [
