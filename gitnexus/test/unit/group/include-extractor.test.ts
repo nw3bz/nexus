@@ -359,4 +359,82 @@ int main(){return 0;}`;
       expect(normalizeContractId('include::map//base///foo.h')).toBe('include::map/base/foo.h');
     });
   });
+
+  // ---- PR #1156 follow-up: `../` relative includes ----
+
+  describe('follow-up: `../` relative includes are skipped', () => {
+    it('does not emit a consumer contract for `#include "../foo.h"`', async () => {
+      // Producer: a header that exists locally but only via parent reference
+      writeFile('include/foo.h', '#pragma once');
+      writeFile(
+        'src/sub/main.cpp',
+        `#include "../../include/foo.h"
+#include "real/cross_repo.h"
+int main() { return 0; }`,
+      );
+
+      const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+      const consumers = contracts.filter((c) => c.role === 'consumer');
+
+      // Only `real/cross_repo.h` should remain — the `..`-prefixed include
+      // is intra-repo noise that no provider can ever satisfy.
+      expect(consumers.map((c) => c.contractId)).toEqual(['include::real/cross_repo.h']);
+    });
+
+    it('skips backslash-form `..\\` for completeness', async () => {
+      writeFile(
+        'src/main.cpp',
+        `#include "..\\\\sibling\\\\foo.h"
+#include "remote/header.h"
+int main() { return 0; }`,
+      );
+
+      const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+      const consumers = contracts.filter((c) => c.role === 'consumer');
+
+      const ids = consumers.map((c) => c.contractId);
+      expect(ids).toContain('include::remote/header.h');
+      expect(ids.some((id) => id.includes('..'))).toBe(false);
+    });
+  });
+
+  // ---- PR #1156 follow-up: graph provider absolute paths ----
+
+  describe('follow-up: extractProvidersGraph strips repo root from absolute paths', () => {
+    it('produces repo-relative contract IDs when the graph returns absolute paths', async () => {
+      writeFile('map/base/view.h', '#pragma once\nclass View {};');
+      writeFile('utils/types.hpp', '#pragma once');
+
+      // Stub the Cypher executor to return absolute paths the way
+      // gitnexus analyze actually persists them.
+      const absolute1 = path.join(tmpDir, 'map/base/view.h');
+      const absolute2 = path.join(tmpDir, 'utils/types.hpp');
+      const stubDb = async () => [
+        { filePath: absolute1, fileId: 'File:abs:1' },
+        { filePath: absolute2, fileId: 'File:abs:2' },
+      ];
+
+      const contracts = await extractor.extract(stubDb, tmpDir, makeRepo(tmpDir));
+      const providers = contracts.filter((c) => c.role === 'provider');
+
+      const ids = providers.map((p) => p.contractId).sort();
+      expect(ids).toEqual(['include::map/base/view.h', 'include::utils/types.hpp']);
+      expect(providers.every((p) => p.meta?.source === 'graph')).toBe(true);
+    });
+
+    it('drops graph rows whose path resolves outside the repo root', async () => {
+      writeFile('local/header.h', '#pragma once');
+      const absoluteLocal = path.join(tmpDir, 'local/header.h');
+      const stubDb = async () => [
+        { filePath: absoluteLocal, fileId: 'File:1' },
+        // Stale absolute path from a different machine — must be skipped.
+        { filePath: '/some/other/repo/foreign.h', fileId: 'File:2' },
+      ];
+
+      const contracts = await extractor.extract(stubDb, tmpDir, makeRepo(tmpDir));
+      const providers = contracts.filter((c) => c.role === 'provider');
+
+      expect(providers.map((p) => p.contractId)).toEqual(['include::local/header.h']);
+    });
+  });
 });

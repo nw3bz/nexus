@@ -336,35 +336,53 @@ export class IncludeExtractor implements ContractExtractor {
   ): Promise<ExtractedContract[]> {
     // Strategy A: graph-assisted
     if (dbExecutor) {
-      const graphProviders = await this.extractProvidersGraph(dbExecutor);
+      const graphProviders = await this.extractProvidersGraph(dbExecutor, repoPath);
       if (graphProviders.length > 0) return graphProviders;
     }
     // Strategy B: filesystem fallback
     return this.extractProvidersFallback(repoPath, allFiles);
   }
 
-  private async extractProvidersGraph(db: CypherExecutor): Promise<ExtractedContract[]> {
+  private async extractProvidersGraph(
+    db: CypherExecutor,
+    repoPath: string,
+  ): Promise<ExtractedContract[]> {
     try {
       const rows = await db(
         `MATCH (f:File)
          WHERE f.filePath =~ '.*\\\\.(h|hpp|hxx|hh)$'
          RETURN f.filePath AS filePath, f.id AS fileId`,
       );
-      return rows
-        .filter((r) => typeof r.filePath === 'string' && r.filePath)
-        .map((r) => {
-          const filePath = (r.filePath as string).replace(/\\/g, '/');
-          return {
-            contractId: `include::${normalizeIncludePath(filePath)}`,
-            type: 'include' as const,
-            role: 'provider' as const,
-            symbolUid: String(r.fileId ?? ''),
-            symbolRef: { filePath, name: path.basename(filePath) },
-            symbolName: path.basename(filePath),
-            confidence: 1.0,
-            meta: { source: 'graph' },
-          };
+      // gitnexus analyze stores absolute paths in the File.filePath column.
+      // Provider contract IDs MUST be repo-relative — otherwise the consumer
+      // emits `include::map/base/view.h` and the provider emits
+      // `include::/abs/path/to/repo/map/base/view.h`, which never match
+      // through runExactMatch and the cross-link silently disappears.
+      // (PR #1156 follow-up review: graph provider absolute-path bug.)
+      const normalizedRepoPath = path.resolve(repoPath);
+      const out: ExtractedContract[] = [];
+      for (const r of rows) {
+        if (typeof r.filePath !== 'string' || !r.filePath) continue;
+        const absolute = r.filePath as string;
+        const rel = path.relative(normalizedRepoPath, absolute);
+        // Skip rows that resolve outside the repo (e.g., system headers
+        // somehow indexed, or stale absolute paths from a different machine).
+        // path.relative returns a `..`-prefixed path or an absolute path
+        // when the target is outside the base — both are wrong for our IDs.
+        if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;
+        const normalizedRel = rel.replace(/\\/g, '/');
+        out.push({
+          contractId: `include::${normalizeIncludePath(normalizedRel)}`,
+          type: 'include' as const,
+          role: 'provider' as const,
+          symbolUid: String(r.fileId ?? ''),
+          symbolRef: { filePath: normalizedRel, name: path.basename(normalizedRel) },
+          symbolName: path.basename(normalizedRel),
+          confidence: 1.0,
+          meta: { source: 'graph' },
         });
+      }
+      return out;
     } catch {
       return [];
     }
@@ -465,6 +483,15 @@ export class IncludeExtractor implements ContractExtractor {
       for (const cleaned of rawIncludes) {
         // Filter: skip known system headers and system path prefixes
         if (isSystemHeader(cleaned)) continue;
+
+        // Skip relative-up includes: `#include "../include/foo.h"` is
+        // almost always an intra-repo reference. The suffix index is built
+        // from repo-relative paths, so isLocalInclude can never match
+        // `../foo.h`, and emitting it as a consumer contract just pollutes
+        // the registry with an entry no provider can ever satisfy.
+        // (PR #1156 follow-up review: `../` relative includes produce
+        // spurious consumer contracts.)
+        if (cleaned.startsWith('../') || cleaned.startsWith('..\\')) continue;
 
         // Local resolution (PR #1156 review finding #4): only accept an
         // exact-suffix match on the *full* include path. The generic

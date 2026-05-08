@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { syncGroup, stableRepoPoolId } from '../../../src/core/group/sync.js';
+import { cleanupTempDir } from '../../helpers/test-db.js';
 import { _captureLogger } from '../../../src/core/logger.js';
 import type {
   GroupConfig,
@@ -689,7 +690,12 @@ service OrderService {
       expect(registry.version).toBe(1);
       expect(registry.contracts).toHaveLength(0);
     } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      // syncGroup now writes bridge.lbug + WAL/shadow sidecars when
+      // skipWrite is false. On Windows, LadybugDB's checkpoint thread can
+      // briefly outlive closeBridgeDb, holding a Win32 lock on the file.
+      // cleanupTempDir tolerates the documented Windows-native lock codes
+      // (EBUSY/EPERM/EACCES/ENOTEMPTY) with bounded retries.
+      await cleanupTempDir(tmpDir);
     }
   });
 

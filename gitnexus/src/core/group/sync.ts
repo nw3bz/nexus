@@ -284,12 +284,28 @@ export async function syncGroup(config: GroupConfig, opts?: SyncOptions): Promis
 
   if (opts?.groupDir && !opts.skipWrite) {
     await writeContractRegistry(opts.groupDir, registry);
-    await writeBridge(opts.groupDir, {
-      contracts: allContracts,
-      crossLinks,
-      repoSnapshots,
-      missingRepos,
-    });
+    // writeBridge failure (disk full, schema error, permission denied) must
+    // not mask the registry — contracts.json was just written successfully
+    // and is the canonical source of truth. A stale or absent bridge
+    // degrades impact queries to empty results, which is recoverable on
+    // the next sync. Surface the failure as a warning so operators can
+    // act, but do not propagate it.
+    // (PR #1156 follow-up review: writeBridge error in sync.ts propagates
+    // uncaught.)
+    try {
+      await writeBridge(opts.groupDir, {
+        contracts: allContracts,
+        crossLinks,
+        repoSnapshots,
+        missingRepos,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        { err: msg, groupDir: opts.groupDir },
+        '⚠️ writeBridge failed; contracts.json is intact but bridge.lbug is stale. Re-run `gitnexus group sync` to retry.',
+      );
+    }
   }
 
   return {
