@@ -46,6 +46,18 @@ describe('isDbBusyError', () => {
     expect(isDbBusyError(undefined)).toBe(false);
   });
 
+  // Documented behavior for lock-shaped strings: the matcher is intentionally
+  // broad because in graph-DB contexts these are all transient. If LadybugDB
+  // ever surfaces a non-transient lock-shaped error (e.g., a recovery-time
+  // "lock file missing"), tighten the matcher and add a negative test here
+  // rather than raising the retry budget.
+  it('treats other lock-shaped errors as transient (current intentional behavior)', () => {
+    expect(isDbBusyError(new Error('deadlock detected'))).toBe(true);
+    expect(isDbBusyError(new Error('unlock failed'))).toBe(true);
+    expect(isDbBusyError(new Error('lock contention'))).toBe(true);
+    expect(isDbBusyError(new Error('Could not open lock file'))).toBe(true);
+  });
+
   it('handles non-Error values gracefully', () => {
     expect(isDbBusyError('BUSY error')).toBe(true);
     expect(isDbBusyError(42)).toBe(false);

@@ -82,12 +82,13 @@ export interface LbugConnectionHandle {
  */
 export const isDbBusyError = (err: unknown): boolean => {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return (
-    msg.includes('busy') ||
-    msg.includes('lock') ||
-    msg.includes('already in use') ||
-    msg.includes('could not set lock')
-  );
+  // `lock` already subsumes `could not set lock`; the broader term is kept
+  // because graph-DB transient errors include "deadlock", "lock contention",
+  // and the LadybugDB native module's "could not set lock on file" — all of
+  // which deserve a retry. If a non-transient lock-shaped error ever
+  // surfaces (e.g., "lock file missing" during recovery), tighten this
+  // matcher rather than raising the retry budget.
+  return msg.includes('busy') || msg.includes('lock') || msg.includes('already in use');
 };
 
 export function createLbugDatabase(
@@ -126,8 +127,9 @@ export function createLbugDatabase(
 // OS-level exclusive lock on `<dbPath>`. On Windows that lock can fail
 // for reasons specific to the OS (Defender briefly opens new files,
 // libuv handle release lags the JS-side close). 5 attempts × 100ms
-// linear back-off (~1.5s worst case) clears the typical AV-scanner hold
-// without masking real cross-process conflicts.
+// linear back-off (max sleep 100+200+300+400 = 1s, plus 5 ctor RTTs
+// of 10–50ms each = ~1.0–1.2s worst case) clears the typical
+// AV-scanner hold without masking real cross-process conflicts.
 //
 // Source: https://github.com/LadybugDB/ladybug/blob/v0.16.1/src/common/file_system/local_file_system.cpp#L126
 const OPEN_LOCK_RETRY_ATTEMPTS = 5;
