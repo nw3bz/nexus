@@ -19,7 +19,10 @@ import type { CachedEmbedding } from '../embeddings/types.js';
 import { extensionManager, type ExtensionEnsureOptions } from './extension-loader.js';
 import {
   closeLbugConnection,
+  isDbBusyError,
+  isOpenRetryExhausted,
   openLbugConnection,
+  waitForWindowsHandleRelease,
   type LbugConnectionHandle,
 } from './lbug-config.js';
 import { isVectorExtensionSupportedByPlatform } from '../platform/capabilities.js';
@@ -186,19 +189,10 @@ const DB_LOCK_RETRY_ATTEMPTS = 3;
 const DB_LOCK_RETRY_DELAY_MS = 500;
 
 /**
- * Return true when the error message indicates that another process holds
- * an exclusive lock on the LadybugDB file (e.g. `gitnexus analyze` or
- * `gitnexus serve` running at the same time).
+ * Re-exported from `lbug-config.ts` (single source of truth) so existing
+ * importers continue to resolve `isDbBusyError` from this module.
  */
-export const isDbBusyError = (err: unknown): boolean => {
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-  return (
-    msg.includes('busy') ||
-    msg.includes('lock') ||
-    msg.includes('already in use') ||
-    msg.includes('could not set lock')
-  );
-};
+export { isDbBusyError };
 
 /**
  * Return true when the error message indicates a write was attempted against
@@ -252,7 +246,11 @@ export const withLbugDb = async <T>(dbPath: string, operation: () => Promise<T>)
       });
     } catch (err) {
       lastError = err;
-      if (!isDbBusyError(err) || attempt === DB_LOCK_RETRY_ATTEMPTS) {
+      // Skip outer retry when the inner open-retry already exhausted: the
+      // ~1.5s open-time budget was just spent, repeating the full reset+
+      // reopen cycle would only add 4-5s of tail latency without changing
+      // the outcome (both layers consult the same isDbBusyError matcher).
+      if (!isDbBusyError(err) || isOpenRetryExhausted(err) || attempt === DB_LOCK_RETRY_ATTEMPTS) {
         throw err;
       }
       // Close stale connection inside the session lock to prevent race conditions
@@ -1064,6 +1062,9 @@ export const flushWAL = async (): Promise<void> => {
  */
 export const safeClose = async (): Promise<void> => {
   await flushWAL();
+  // Capture before close — currentDbPath stays set so the Windows post-close
+  // probe below knows which file to wait on.
+  const closingDbPath = currentDbPath;
   if (conn) {
     try {
       // eslint-disable-next-line no-restricted-syntax -- sole authorised close site
@@ -1081,6 +1082,24 @@ export const safeClose = async (): Promise<void> => {
       /* best-effort */
     }
     db = null;
+  }
+  // Windows: libuv reports `db.close()` resolved before the kernel has
+  // released the file handle. A subsequent `new Database(samePath)` in
+  // the same process can race the release. The probe (lbug-config.ts)
+  // forces any residual lock to surface as EBUSY/EPERM/EACCES so the
+  // open-time retry absorbs the lag.
+  if (process.platform === 'win32' && closingDbPath) {
+    const released = await waitForWindowsHandleRelease(closingDbPath);
+    if (!released) {
+      // Probe exhausted with a lock code still in flight. The next
+      // openLbugConnection will absorb whatever residual lag remains, but
+      // a chronic warning helps operators spot AV interference (Windows
+      // Defender holding the file far past the 250ms budget).
+      logger.warn(
+        { dbPath: closingDbPath },
+        '⚠️ LadybugDB file handle still locked after close (Windows). If this repeats, check antivirus/Defender exclusions for the GitNexus storage directory.',
+      );
+    }
   }
 };
 
