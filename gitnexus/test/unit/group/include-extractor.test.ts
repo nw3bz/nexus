@@ -437,4 +437,89 @@ int main() { return 0; }`,
       expect(providers.map((p) => p.contractId)).toEqual(['include::local/header.h']);
     });
   });
+
+  // ---- PR #1156 Codex follow-up: discovery aligned with ingestion ----
+
+  describe('follow-up: file discovery honors createIgnoreFilter and getMaxFileSizeBytes', () => {
+    it('does not emit a provider contract for a header excluded by .gitignore', async () => {
+      writeFile('.gitignore', 'vendor-headers/\n');
+      writeFile('vendor-headers/blocked.h', '#pragma once');
+      writeFile('src/wanted.h', '#pragma once');
+
+      const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+      const providerIds = contracts.filter((c) => c.role === 'provider').map((p) => p.contractId);
+
+      expect(providerIds).toContain('include::src/wanted.h');
+      expect(providerIds).not.toContain('include::vendor-headers/blocked.h');
+    });
+
+    it('does not emit a provider contract for a header excluded by .gitnexusignore', async () => {
+      writeFile('.gitnexusignore', 'legacy/\n');
+      writeFile('legacy/old.h', '#pragma once');
+      writeFile('src/current.h', '#pragma once');
+
+      const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+      const providerIds = contracts.filter((c) => c.role === 'provider').map((p) => p.contractId);
+
+      expect(providerIds).toContain('include::src/current.h');
+      expect(providerIds).not.toContain('include::legacy/old.h');
+    });
+
+    it('does not parse #include directives in a source file excluded by .gitignore', async () => {
+      // The ignored source file references a header that would otherwise be
+      // a cross-repo consumer. After alignment, the ignored file is invisible
+      // to the consumer scan — no consumer contract should appear.
+      writeFile('.gitignore', 'generated/\n');
+      writeFile(
+        'generated/auto.cpp',
+        `#include "remote/should_not_appear.h"
+int auto_main() { return 0; }`,
+      );
+
+      const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+      const consumerIds = contracts.filter((c) => c.role === 'consumer').map((c) => c.contractId);
+
+      expect(consumerIds).not.toContain('include::remote/should_not_appear.h');
+    });
+
+    it('skips a provider header whose size exceeds GITNEXUS_MAX_FILE_SIZE', async () => {
+      const previous = process.env.GITNEXUS_MAX_FILE_SIZE;
+      process.env.GITNEXUS_MAX_FILE_SIZE = '1'; // 1 KB cap
+      try {
+        // 4 KB header — comfortably exceeds the cap.
+        const oversized = '#pragma once\n' + 'x'.repeat(4 * 1024);
+        writeFile('huge/big.h', oversized);
+        writeFile('small/tiny.h', '#pragma once');
+
+        const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+        const providerIds = contracts.filter((c) => c.role === 'provider').map((p) => p.contractId);
+
+        expect(providerIds).toContain('include::small/tiny.h');
+        expect(providerIds).not.toContain('include::huge/big.h');
+      } finally {
+        if (previous === undefined) delete process.env.GITNEXUS_MAX_FILE_SIZE;
+        else process.env.GITNEXUS_MAX_FILE_SIZE = previous;
+      }
+    });
+
+    it('skips parsing #include directives in source files exceeding GITNEXUS_MAX_FILE_SIZE', async () => {
+      const previous = process.env.GITNEXUS_MAX_FILE_SIZE;
+      process.env.GITNEXUS_MAX_FILE_SIZE = '1';
+      try {
+        const oversized =
+          '#include "remote/should_not_appear.h"\n' +
+          '// padding to push the file past 1 KB\n' +
+          'x'.repeat(4 * 1024);
+        writeFile('big/main.cpp', oversized);
+
+        const contracts = await extractor.extract(null, tmpDir, makeRepo(tmpDir));
+        const consumerIds = contracts.filter((c) => c.role === 'consumer').map((c) => c.contractId);
+
+        expect(consumerIds).not.toContain('include::remote/should_not_appear.h');
+      } finally {
+        if (previous === undefined) delete process.env.GITNEXUS_MAX_FILE_SIZE;
+        else process.env.GITNEXUS_MAX_FILE_SIZE = previous;
+      }
+    });
+  });
 });

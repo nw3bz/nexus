@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
 import { glob } from 'glob';
 import Parser from 'tree-sitter';
 import C from 'tree-sitter-c';
@@ -7,6 +8,8 @@ import type { ContractExtractor, CypherExecutor } from '../contract-extractor.js
 import type { ExtractedContract, RepoHandle } from '../types.js';
 import { readSafe } from './fs-utils.js';
 import { buildSuffixIndex, type SuffixIndex } from '../../ingestion/import-resolvers/utils.js';
+import { createIgnoreFilter } from '../../../config/ignore-service.js';
+import { getMaxFileSizeBytes } from '../../ingestion/utils/max-file-size.js';
 
 /**
  * Cross-repo C/C++ `#include` dependency extractor.
@@ -28,19 +31,7 @@ import { buildSuffixIndex, type SuffixIndex } from '../../ingestion/import-resol
 
 const HEADER_EXTENSIONS = new Set(['.h', '.hpp', '.hxx', '.hh']);
 
-const SOURCE_GLOB = '**/*.{c,cpp,cc,cxx,h,hpp,hxx,hh}';
-
-const STANDARD_IGNORES = [
-  '**/node_modules/**',
-  '**/.git/**',
-  '**/vendor/**',
-  '**/dist/**',
-  '**/build/**',
-  '**/.gitnexus/**',
-  '**/third_party/**',
-  '**/3rdparty/**',
-  '**/external/**',
-];
+const SOURCE_EXTENSIONS = new Set(['.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.hxx', '.hh']);
 
 const INCLUDE_QUERY_SRC = '(preproc_include path: (_) @import.source) @import';
 
@@ -309,22 +300,65 @@ export class IncludeExtractor implements ContractExtractor {
     repoPath: string,
     _repo: RepoHandle,
   ): Promise<ExtractedContract[]> {
-    // 1. Build the local file list (for suffix resolution)
-    const allFiles = await glob('**/*', {
-      cwd: repoPath,
-      ignore: STANDARD_IGNORES,
-      nodir: true,
-    });
+    // 1. Build the local file list using the same discovery as ingestion
+    //    (createIgnoreFilter + getMaxFileSizeBytes). This guarantees the
+    //    universe of provider/consumer paths matches the universe of File
+    //    nodes in the LadybugDB graph — so no cross-link points at a UID
+    //    that group impact cannot fan out to.
+    //    (PR #1156 Codex follow-up: discovery aligned with ingestion.)
+    const allFiles = await this.discoverIndexableFiles(repoPath);
     const normalizedFiles = allFiles.map((f) => f.replace(/\\/g, '/'));
     const suffixIndex = buildSuffixIndex(normalizedFiles, allFiles);
 
     // 2. Provider: register all header files
     const providers = await this.extractProviders(dbExecutor, repoPath, allFiles);
 
-    // 3. Consumer: find unresolved #include directives
-    const consumers = await this.extractConsumers(repoPath, normalizedFiles, allFiles, suffixIndex);
+    // 3. Consumer: filter the shared discovery list for source extensions
+    //    and parse #include directives in those files.
+    const sourceFiles = allFiles.filter((f) =>
+      SOURCE_EXTENSIONS.has(path.extname(f).toLowerCase()),
+    );
+    const consumers = await this.extractConsumers(repoPath, sourceFiles, suffixIndex);
 
     return this.dedupe([...providers, ...consumers]);
+  }
+
+  /**
+   * Discover repo-relative file paths using exactly the same rules the
+   * ingestion pipeline uses (`walkRepositoryPaths` in
+   * `gitnexus/src/core/ingestion/filesystem-walker.ts`):
+   *   - `createIgnoreFilter` honors `.gitignore`, `.gitnexusignore`, the
+   *     hardcoded ignore list, and `.gitnexusignore` last-match-wins
+   *     negation.
+   *   - `getMaxFileSizeBytes()` drops files larger than the cap so we
+   *     never emit `File:<rel>` UIDs for files ingestion would skip.
+   *
+   * Uses sequential stat — there is no `READ_CONCURRENCY` batching here
+   * because group sync runs at startup-time, not the ingestion hot path,
+   * and parallelism gains are not worth the import-graph weight.
+   */
+  private async discoverIndexableFiles(repoPath: string): Promise<string[]> {
+    const ignoreFilter = await createIgnoreFilter(repoPath);
+    const maxFileSizeBytes = getMaxFileSizeBytes();
+
+    const candidates = await glob('**/*', {
+      cwd: repoPath,
+      nodir: true,
+      dot: false,
+      ignore: ignoreFilter,
+    });
+
+    const survivors: string[] = [];
+    for (const rel of candidates) {
+      try {
+        const stat = await fs.stat(path.join(repoPath, rel));
+        if (stat.size > maxFileSizeBytes) continue;
+        survivors.push(rel);
+      } catch {
+        /* file disappeared between glob and stat — skip */
+      }
+    }
+    return survivors;
   }
 
   // ---------- provider extraction ----------
@@ -410,16 +444,9 @@ export class IncludeExtractor implements ContractExtractor {
 
   private async extractConsumers(
     repoPath: string,
-    normalizedFiles: string[],
-    allFiles: string[],
+    sourceFiles: string[],
     suffixIndex: SuffixIndex,
   ): Promise<ExtractedContract[]> {
-    const sourceFiles = await glob(SOURCE_GLOB, {
-      cwd: repoPath,
-      ignore: STANDARD_IGNORES,
-      nodir: true,
-    });
-
     const parser = new Parser();
     const out: ExtractedContract[] = [];
     // Compile the include query once per grammar to avoid re-compilation per file
