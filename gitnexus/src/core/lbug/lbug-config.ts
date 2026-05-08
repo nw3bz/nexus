@@ -267,28 +267,43 @@ export async function closeLbugConnection(handle: LbugConnectionHandle): Promise
 }
 
 /**
- * Probe `dbPath` after `db.close()` so any residual native file handle
- * surfaces as EBUSY/EPERM/EACCES and the bounded retry absorbs the
- * release lag. Windows-only — Linux/macOS do not exhibit this race.
+ * Probe `dbPath` AND its `.wal` sidecar after `db.close()` so any
+ * residual native file handle surfaces as EBUSY/EPERM/EACCES and the
+ * bounded retry absorbs the release lag. Windows-only — Linux/macOS do
+ * not exhibit this race.
  *
- * Returns `true` when the probe succeeded (handle was openable, lock
- * released cleanly) or when the probe was not needed (path missing,
- * non-lock error). Returns `false` when the probe exhausted its budget
- * with a lock code still in flight — caller may log a warning if the
- * platform is expected to be free of AV interference.
+ * Both files matter. Empirically, on rapid open→close→reopen cycles the
+ * main `dbPath` handle releases first; the `.wal` handle from the
+ * previous Database lingers and the new Database's first write (CREATE
+ * NODE TABLE during schema init) fails with "Could not set lock on
+ * file". Probing both makes safeClose actually return when the kernel
+ * is fully done with the path.
+ *
+ * Returns `true` when both probes succeeded (or skipped on non-lock
+ * errors / missing files). Returns `false` when either probe exhausted
+ * its budget with a lock code still in flight.
  *
  * Defensive shape:
- *   - Opens read-only (`'r'`) to minimize sharing-mode contention with
- *     concurrent processes (a writable handle would request more rights
- *     and could itself trigger sharing violations on Windows).
+ *   - Opens read+write (`'r+'`) so the probe actually surfaces exclusive
+ *     locks held by the previous Database. A read-only probe (`'r'`) is
+ *     insufficient — Windows will grant read access while the previous
+ *     handle's exclusive write lock is still in flight, which lets
+ *     `safeClose` return before the next CREATE NODE TABLE can lock the
+ *     file.
  *   - `try/finally` around `handle.close()` guarantees no fd leak even
  *     if close itself throws.
  */
 export const waitForWindowsHandleRelease = async (dbPath: string): Promise<boolean> => {
+  const mainReleased = await probeSinglePath(dbPath);
+  const walReleased = await probeSinglePath(dbPath + '.wal');
+  return mainReleased && walReleased;
+};
+
+const probeSinglePath = async (filePath: string): Promise<boolean> => {
   for (let attempt = 1; attempt <= HANDLE_RELEASE_PROBE_ATTEMPTS; attempt++) {
     let handle: fs.FileHandle | undefined;
     try {
-      handle = await fs.open(dbPath, 'r');
+      handle = await fs.open(filePath, 'r+');
       return true;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException | undefined)?.code;
