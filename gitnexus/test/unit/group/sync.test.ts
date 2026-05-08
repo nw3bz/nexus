@@ -584,6 +584,47 @@ service OrderService {
     }
   });
 
+  it('does not extract include contracts during real sync when includes detection is disabled', async () => {
+    // PR #1156 Codex follow-up: ce-code-review T1 — verifies the gate at
+    // sync.ts:174 honors `detect.includes: false`. Mirrors the existing
+    // thrift-off pattern at sync.test.ts:545.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gitnexus-sync-includes-off-'));
+    const storageDir = path.join(tmpDir, '.gitnexus');
+    fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
+    fs.mkdirSync(storageDir, { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, 'src', 'view.h'), '#pragma once\nclass View {};');
+
+    const config = makeConfig({ 'app/cpp-lib': 'cpp-lib-repo' });
+    config.detect.http = false;
+    config.detect.grpc = false;
+    config.detect.thrift = false;
+    config.detect.topics = false;
+    config.detect.includes = false;
+
+    const poolAdapter = await import('../../../src/core/lbug/pool-adapter.js');
+    const initSpy = vi.spyOn(poolAdapter, 'initLbug').mockResolvedValue(undefined);
+    const closeSpy = vi.spyOn(poolAdapter, 'closeLbug').mockResolvedValue(undefined);
+
+    try {
+      const result = await syncGroup(config, {
+        resolveRepoHandle: async (_name, groupPath) => ({
+          id: 'cpp-lib-repo',
+          path: groupPath,
+          repoPath: tmpDir,
+          storagePath: storageDir,
+        }),
+        skipWrite: true,
+      });
+
+      expect(result.missingRepos).toHaveLength(0);
+      expect(result.contracts.filter((c) => c.type === 'include')).toHaveLength(0);
+    } finally {
+      initSpy.mockRestore();
+      closeSpy.mockRestore();
+      await cleanupTempDir(tmpDir);
+    }
+  });
+
   it('dedupes duplicate wildcard cross-links during sync', async () => {
     const config = makeConfig({ 'app/provider': 'provider-repo', 'app/consumer': 'consumer-repo' });
     const provider: StoredContract = {

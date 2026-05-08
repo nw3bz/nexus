@@ -10,6 +10,7 @@ import { readSafe } from './fs-utils.js';
 import { buildSuffixIndex, type SuffixIndex } from '../../ingestion/import-resolvers/utils.js';
 import { createIgnoreFilter } from '../../../config/ignore-service.js';
 import { getMaxFileSizeBytes } from '../../ingestion/utils/max-file-size.js';
+import { logger } from '../../logger.js';
 
 /**
  * Cross-repo C/C++ `#include` dependency extractor.
@@ -31,7 +32,11 @@ import { getMaxFileSizeBytes } from '../../ingestion/utils/max-file-size.js';
 
 const HEADER_EXTENSIONS = new Set(['.h', '.hpp', '.hxx', '.hh']);
 
-const SOURCE_EXTENSIONS = new Set(['.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.hxx', '.hh']);
+// Source = headers (provider-eligible) ∪ implementation files (.c/.cpp/.cc/.cxx).
+// Spread keeps the subset relationship explicit so a future contributor adding
+// a new header extension to HEADER_EXTENSIONS does not have to remember to
+// also add it here.
+const SOURCE_EXTENSIONS = new Set<string>([...HEADER_EXTENSIONS, '.c', '.cpp', '.cc', '.cxx']);
 
 const INCLUDE_QUERY_SRC = '(preproc_include path: (_) @import.source) @import';
 
@@ -336,6 +341,13 @@ export class IncludeExtractor implements ContractExtractor {
    * Uses sequential stat — there is no `READ_CONCURRENCY` batching here
    * because group sync runs at startup-time, not the ingestion hot path,
    * and parallelism gains are not worth the import-graph weight.
+   *
+   * MAINTENANCE: if `walkRepositoryPaths` changes its glob options, ignore
+   * filter shape, or size-cap logic, mirror those changes here. The two
+   * implementations exist because the consumers need different return
+   * shapes (string[] vs ScannedFile[]) and different concurrency, but
+   * they MUST agree on which files are reachable — that is what makes
+   * `File:<rel>` UIDs in cross-links correspond to graph File nodes.
    */
   private async discoverIndexableFiles(repoPath: string): Promise<string[]> {
     const ignoreFilter = await createIgnoreFilter(repoPath);
@@ -354,8 +366,20 @@ export class IncludeExtractor implements ContractExtractor {
         const stat = await fs.stat(path.join(repoPath, rel));
         if (stat.size > maxFileSizeBytes) continue;
         survivors.push(rel);
-      } catch {
-        /* file disappeared between glob and stat — skip */
+      } catch (err) {
+        // ENOENT is the documented benign race (glob enumerated a file
+        // that was deleted before we stat'd it — same race
+        // walkRepositoryPaths absorbs via Promise.allSettled). Anything
+        // else (EACCES, EMFILE, EIO) deserves a warning so an operator
+        // can spot a permission/resource problem instead of silently
+        // shipping fewer contracts than expected.
+        const code = (err as NodeJS.ErrnoException | undefined)?.code;
+        if (code !== 'ENOENT') {
+          logger.warn(
+            { err: (err as Error).message, file: rel, repoPath },
+            '⚠️ IncludeExtractor: stat failed during discovery; skipping file',
+          );
+        }
       }
     }
     return survivors;
