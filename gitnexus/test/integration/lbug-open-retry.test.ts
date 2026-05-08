@@ -20,7 +20,6 @@ import {
   openLbugConnection,
   waitForWindowsHandleRelease,
 } from '../../src/core/lbug/lbug-config.js';
-import * as adapterReexport from '../../src/core/lbug/lbug-adapter.js';
 
 // ─── Minimal stub of the `lbug` module surface used by openLbugConnection ──
 
@@ -51,10 +50,7 @@ const makeStubLbug = (control: StubModuleControl) => {
   return { Database: FakeDatabase, Connection: FakeConnection } as any;
 };
 
-describe('isDbBusyError (re-exported source of truth)', () => {
-  it('matcher in lbug-adapter is the same function as in lbug-config', () => {
-    expect(adapterReexport.isDbBusyError).toBe(isDbBusyError);
-  });
+describe('isDbBusyError', () => {
   it('matches the documented Windows lock-error wording', () => {
     expect(isDbBusyError(new Error('Could not set lock on file foo.lbug'))).toBe(true);
     expect(isDbBusyError(new Error('database is locked'))).toBe(true);

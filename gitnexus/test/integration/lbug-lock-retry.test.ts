@@ -14,7 +14,7 @@ import { withTestLbugDB } from '../helpers/test-indexed-db.js';
 
 // Pure-function tests — no DB needed, but grouped here for cohesion
 // with the retry logic they guard.
-import { isDbBusyError } from '../../src/core/lbug/lbug-adapter.js';
+import { isDbBusyError } from '../../src/core/lbug/lbug-config.js';
 
 describe('isDbBusyError', () => {
   it('returns true for "busy" errors (case-insensitive)', () => {

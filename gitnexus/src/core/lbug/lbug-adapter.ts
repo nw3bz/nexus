@@ -189,12 +189,6 @@ const DB_LOCK_RETRY_ATTEMPTS = 3;
 const DB_LOCK_RETRY_DELAY_MS = 500;
 
 /**
- * Re-exported from `lbug-config.ts` (single source of truth) so existing
- * importers continue to resolve `isDbBusyError` from this module.
- */
-export { isDbBusyError };
-
-/**
  * Return true when the error message indicates a write was attempted against
  * a read-only LadybugDB connection. The MCP query pool opens DBs read-only,
  * so any path that calls a `CREATE_*` procedure there will surface this

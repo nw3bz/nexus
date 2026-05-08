@@ -62,11 +62,10 @@ export interface LbugConnectionHandle {
  * (`new lbug.Database(...)` raises from `local_file_system.cpp`) or during
  * a query (another writer holds the exclusive lock).
  *
- * Source of truth lives here so both the construction-time retry
- * (`openWithLockRetry`) and the query-time retry (`withLbugDb` in
- * `lbug-adapter.ts`) agree on the matcher. Other matchers (e.g.
- * `isReadOnlyDbError`) should follow this pattern: define here, re-export
- * from the adapter — see `references/findings-schema.json` adv-1 / maint-4.
+ * Lives here (not in `lbug-adapter.ts`) so both the construction-time
+ * retry (`openWithLockRetry` in this file) and the query-time retry
+ * (`withLbugDb` in `lbug-adapter.ts`) consult the same matcher. Callers
+ * import directly from this module — no re-export to keep in sync.
  */
 export const isDbBusyError = (err: unknown): boolean => {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
