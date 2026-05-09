@@ -81,6 +81,20 @@ jobs:
 
       - name: Capture diff and metadata
         id: capture
+        # Pass GitHub-context values via env: rather than `${{ }}`
+        # interpolated directly into the bash body. `head.ref` and
+        # `head.repo.full_name` are fork-controlled strings; expanding
+        # them into shell source is the canonical template-injection
+        # vector zizmor flags. Even though this job has `permissions: {}`,
+        # routing through env: makes it impossible for a future scope
+        # grant to turn into RCE. Inside bash, reference as `$HEAD_REF`
+        # etc. — the values are then plain strings, not code.
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
@@ -106,12 +120,12 @@ jobs:
           # `assert_field` validators and the agent-facing JSON block in
           # the sticky comment. Bump `schema` when changing field names.
           jq -n \
-            --arg     schema      'gitnexus.pr-autofix/v1' \
-            --argjson pr_number   '${{ github.event.pull_request.number }}' \
-            --arg     head_sha    '${{ github.event.pull_request.head.sha }}' \
-            --arg     head_ref    '${{ github.event.pull_request.head.ref }}' \
-            --arg     head_repo   '${{ github.event.pull_request.head.repo.full_name }}' \
-            --arg     base_repo   '${{ github.repository }}' \
+            --arg     schema        'gitnexus.pr-autofix/v1' \
+            --argjson pr_number     "${PR_NUMBER}" \
+            --arg     head_sha      "${HEAD_SHA}" \
+            --arg     head_ref      "${HEAD_REF}" \
+            --arg     head_repo     "${HEAD_REPO}" \
+            --arg     base_repo     "${BASE_REPO}" \
             --argjson changed_lines "${changed_lines}" \
             '{schema:$schema, pr_number:$pr_number, head_sha:$head_sha, head_ref:$head_ref, head_repo:$head_repo, base_repo:$base_repo, changed_lines:$changed_lines}' \
             > autofix-out/metadata.json
